@@ -1,0 +1,16 @@
+[Unit]
+Description=GITAM SMARTPRINT Fullscreen HDMI Chromium Kiosk
+After=network-online.target smartprint-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+ExecStart=/bin/bash /opt/smartprint/raspberry-pi/scripts/kiosk_setup.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

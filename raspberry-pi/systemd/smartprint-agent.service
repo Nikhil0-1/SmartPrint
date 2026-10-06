@@ -1,0 +1,25 @@
+[Unit]
+Description=GITAM SMARTPRINT Raspberry Pi Agent Service
+After=network-online.target cups.service
+Wants=network-online.target cups.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/smartprint
+ExecStartPre=/bin/bash /opt/smartprint/raspberry-pi/scripts/cleanup.sh
+ExecStart=/usr/bin/python3 /opt/smartprint/raspberry-pi/agent/smartprint_agent.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTPRINT_CONFIG=/etc/smartprint/agent_config.json
+
+# Hardened security sandbox
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
