@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
-import { createRazorpayOrderMock, getRazorpayKeyId } from '@/lib/razorpay';
+import { createRazorpayOrder, getRazorpayKeyId } from '@/lib/razorpay';
 
 export async function POST(request: Request) {
   try {
@@ -22,8 +22,24 @@ export async function POST(request: Request) {
       );
     }
 
+    // SERVER-SIDE PRINTER ROUTING SAFETY CHECK
+    // Verify printer availability before accepting payment
+    const printerCheck = store.selectPrinterForJob(job.kiosk_id, job.is_color, job.is_duplex);
+    if (!printerCheck.success || !printerCheck.printer) {
+      return NextResponse.json(
+        {
+          error: printerCheck.error_message || 'The required printer is currently unavailable.',
+          code: 'PRINTER_UNAVAILABLE',
+        },
+        { status: 503 }
+      );
+    }
+
+    // Assign chosen printer to job
+    job.printer_id = printerCheck.printer.id;
+
     // Create Razorpay Order
-    const order = createRazorpayOrderMock(job.calculated_amount, job.id);
+    const order = await createRazorpayOrder(job.calculated_amount, job.id);
     store.createPayment(job.id, order.id, job.calculated_amount, 'INR');
 
     return NextResponse.json({
@@ -34,6 +50,7 @@ export async function POST(request: Request) {
       currency: 'INR',
       key_id: getRazorpayKeyId(),
       job_id: job.id,
+      printer_assigned: printerCheck.printer.display_name,
     });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });

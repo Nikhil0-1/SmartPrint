@@ -3,7 +3,9 @@ import { store } from '@/lib/store';
 
 export async function POST(request: Request) {
   try {
-    const kioskId = request.headers.get('x-kiosk-id') || (await request.clone().json()).kiosk_id;
+    // Parse body once
+    const payload = await request.json();
+    const kioskId = request.headers.get('x-kiosk-id') || payload.kiosk_id;
     const deviceToken = request.headers.get('x-device-token');
 
     if (!kioskId) {
@@ -20,7 +22,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Invalid device credentials' }, { status: 403 });
     }
 
-    const payload = await request.json();
     store.recordHeartbeat(kioskId, {
       cpu_temp: payload.cpu_temp,
       ram_usage: payload.ram_usage,

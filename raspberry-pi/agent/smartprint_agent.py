@@ -306,8 +306,8 @@ class SmartPrintAgent:
             # 3. Update status to PROCESSING
             self.make_api_request("/api/kiosk/update-status", {"job_id": job_id, "status": "PROCESSING"})
 
-            # 4. Submit to CUPS
-            self.make_api_request("/api/kiosk/update-status", {"job_id": job_id, "status": "SUBMITTED_TO_CUPS"})
+            # 4. Submit to CUPS using server-selected queue
+            target_queue = job.get("cups_printer_name") or job.get("cups_queue_name")
             options = {
                 "copies": job.get("copies", 1),
                 "pages_selected": job.get("pages_selected", "All"),
@@ -316,8 +316,8 @@ class SmartPrintAgent:
                 "orientation": job.get("orientation", "portrait")
             }
 
-            cups_job_id = self.cups.submit_print_job(local_file_path, options)
-            logging.info(f"Submitted to CUPS with job ID {cups_job_id}")
+            cups_job_id = self.cups.submit_print_job(local_file_path, options, queue_name=target_queue)
+            logging.info(f"Submitted to CUPS queue '{target_queue or self.cups.default_queue}' with job ID {cups_job_id}")
 
             self.make_api_request("/api/kiosk/update-status", {
                 "job_id": job_id,
@@ -325,8 +325,8 @@ class SmartPrintAgent:
                 "cups_job_id": cups_job_id
             })
 
-            # 5. Wait for verified completion
-            success, status_msg = self.cups.wait_for_job_completion(cups_job_id, timeout_seconds=120)
+            # 5. Wait for verified completion on target queue
+            success, status_msg = self.cups.wait_for_job_completion(cups_job_id, timeout_seconds=120, queue_name=target_queue)
 
             if success:
                 logging.info(f"Print job {job_id} verified COMPLETED!")

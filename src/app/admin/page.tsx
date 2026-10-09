@@ -35,10 +35,18 @@ import {
   Cell,
 } from 'recharts';
 import { DEFAULT_BRANDING, DEFAULT_PRICING } from '@/lib/constants';
+import { AdminAuthGuard } from '@/components/AdminAuthGuard';
+import { LogOut, UserCheck } from 'lucide-react';
 
-export default function AdminPanelPage() {
+interface CurrentAdmin {
+  email: string;
+  role: string;
+  onLogout: () => void;
+}
+
+function AdminDashboardContent({ currentUser }: { currentUser: CurrentAdmin }) {
   const [activeTab, setActiveTab] = useState<
-    'dashboard' | 'kiosks' | 'printers' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings'
+    'dashboard' | 'kiosks' | 'printers' | 'routing' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings'
   >('dashboard');
 
   const [loading, setLoading] = useState<boolean>(true);
@@ -233,6 +241,7 @@ export default function AdminPanelPage() {
               { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
               { id: 'kiosks', label: 'Kiosks Manager', icon: Monitor },
               { id: 'printers', label: 'Printer Hardware', icon: Printer },
+              { id: 'routing', label: 'Printer Routing', icon: Sliders },
               { id: 'jobs', label: 'Print Jobs & Queue', icon: FileText },
               { id: 'payments', label: 'Payments & Revenue', icon: CreditCard },
               { id: 'pricing', label: 'Pricing Engine', icon: Tag },
@@ -298,6 +307,21 @@ export default function AdminPanelPage() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* User Info & Role Badge */}
+            <div className="hidden md:flex items-center gap-2 bg-slate-50 border border-slate-200/80 px-3 py-1.5 rounded-xl text-xs">
+              <UserCheck className="w-3.5 h-3.5 text-blue-600" />
+              <span className="font-bold text-slate-800">{currentUser.email}</span>
+              <span
+                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                  currentUser.role === 'SUPER_ADMIN'
+                    ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                    : 'bg-blue-100 text-blue-800 border border-blue-200'
+                }`}
+              >
+                {currentUser.role}
+              </span>
+            </div>
+
             <button
               onClick={() => fetchAdminData()}
               className="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-colors"
@@ -305,6 +329,7 @@ export default function AdminPanelPage() {
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Refresh</span>
             </button>
+
             <button
               onClick={() => handleTriggerSimulation('simulate_heartbeat')}
               disabled={isSimulating}
@@ -312,6 +337,14 @@ export default function AdminPanelPage() {
             >
               <Zap className="w-3.5 h-3.5" />
               <span>Simulate Pi Ping</span>
+            </button>
+
+            <button
+              onClick={currentUser.onLogout}
+              className="px-3 py-1.5 rounded-lg border border-red-200 hover:bg-red-50 text-xs font-bold text-red-600 flex items-center gap-1.5 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Logout</span>
             </button>
           </div>
         </header>
@@ -570,6 +603,185 @@ export default function AdminPanelPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3.5: PRINTER ROUTING */}
+          {activeTab === 'routing' && (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-6">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Multi-Printer Server-Side Routing</h3>
+                <p className="text-xs text-slate-500">
+                  Configure primary and backup printer routes for B&W and Color customer print jobs
+                </p>
+              </div>
+
+              <div className="space-y-6">
+                {(adminData?.kiosks || []).map((kiosk: any) => {
+                  const kioskPrinters = (adminData?.printers || []).filter(
+                    (p: any) => p.kiosk_id === kiosk.id
+                  );
+                  const currentRoute = (adminData?.routings || []).find(
+                    (r: any) => r.kiosk_id === kiosk.id
+                  ) || {
+                    bw_primary_printer_id: kioskPrinters[0]?.id,
+                    bw_backup_printer_id: null,
+                    color_primary_printer_id: kioskPrinters.find((p: any) => p.supports_color)?.id,
+                    color_backup_printer_id: null,
+                    auto_backup_enabled: true,
+                  };
+
+                  const handleSaveRoute = async (updatedFields: any) => {
+                    try {
+                      const res = await fetch('/api/admin/routing', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ kiosk_id: kiosk.id, ...currentRoute, ...updatedFields }),
+                      });
+                      const resData = await res.json();
+                      if (res.ok && resData.success) {
+                        showToast(`Routing updated for ${kiosk.id}`);
+                        fetchAdminData();
+                      } else {
+                        showToast(resData.error || 'Failed updating routing', 'error');
+                      }
+                    } catch (err) {
+                      showToast('Routing request error', 'error');
+                    }
+                  };
+
+                  return (
+                    <div key={kiosk.id} className="p-5 rounded-2xl border border-slate-200 bg-slate-50/50 space-y-4">
+                      <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                        <div>
+                          <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                            <Monitor className="w-4 h-4 text-blue-600" />
+                            <span>{kiosk.name} ({kiosk.id})</span>
+                          </h4>
+                          <span className="text-[11px] text-slate-500">
+                            {kioskPrinters.length} printer(s) connected
+                          </span>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={currentRoute.auto_backup_enabled}
+                            onChange={(e) => handleSaveRoute({ auto_backup_enabled: e.target.checked })}
+                            className="rounded text-blue-600"
+                          />
+                          <span>Automatic Backup Rerouting</span>
+                        </label>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {/* BLACK & WHITE ROUTING */}
+                        <div className="p-4 rounded-xl bg-white border border-slate-200 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-black text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                              <span className="w-2.5 h-2.5 rounded-full bg-slate-900"></span>
+                              B&W PRINT ROUTING
+                            </span>
+                          </div>
+
+                          <div className="space-y-2 text-xs">
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">
+                                Primary Printer (B&W)
+                              </label>
+                              <select
+                                value={currentRoute.bw_primary_printer_id || ''}
+                                onChange={(e) => handleSaveRoute({ bw_primary_printer_id: e.target.value })}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-white text-slate-900 font-semibold"
+                              >
+                                <option value="">Select Primary B&W Printer...</option>
+                                {kioskPrinters.map((p: any) => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.display_name || p.printer_name} ({p.cups_queue_name})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">
+                                Backup Printer (B&W)
+                              </label>
+                              <select
+                                value={currentRoute.bw_backup_printer_id || ''}
+                                onChange={(e) =>
+                                  handleSaveRoute({ bw_backup_printer_id: e.target.value || null })
+                                }
+                                className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-white text-slate-900 font-semibold"
+                              >
+                                <option value="">None (No Backup Route)</option>
+                                {kioskPrinters.map((p: any) => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.display_name || p.printer_name} ({p.cups_queue_name})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* COLOR ROUTING */}
+                        <div className="p-4 rounded-xl bg-white border border-slate-200 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-black text-blue-700 uppercase tracking-wider flex items-center gap-1.5">
+                              <span className="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
+                              COLOR PRINT ROUTING
+                            </span>
+                          </div>
+
+                          <div className="space-y-2 text-xs">
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">
+                                Primary Printer (Color)
+                              </label>
+                              <select
+                                value={currentRoute.color_primary_printer_id || ''}
+                                onChange={(e) => handleSaveRoute({ color_primary_printer_id: e.target.value })}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-white text-slate-900 font-semibold"
+                              >
+                                <option value="">Select Primary Color Printer...</option>
+                                {kioskPrinters
+                                  .filter((p: any) => p.supports_color)
+                                  .map((p: any) => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.display_name || p.printer_name} ({p.cups_queue_name})
+                                    </option>
+                                  ))}
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">
+                                Backup Printer (Color)
+                              </label>
+                              <select
+                                value={currentRoute.color_backup_printer_id || ''}
+                                onChange={(e) =>
+                                  handleSaveRoute({ color_backup_printer_id: e.target.value || null })
+                                }
+                                className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-white text-slate-900 font-semibold"
+                              >
+                                <option value="">None (No Backup Route)</option>
+                                {kioskPrinters
+                                  .filter((p: any) => p.supports_color)
+                                  .map((p: any) => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.display_name || p.printer_name} ({p.cups_queue_name})
+                                    </option>
+                                  ))}
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1017,5 +1229,13 @@ export default function AdminPanelPage() {
         </div>
       </main>
     </div>
+  );
+}
+
+export default function AdminPanelPage() {
+  return (
+    <AdminAuthGuard>
+      {(currentUser) => <AdminDashboardContent currentUser={currentUser} />}
+    </AdminAuthGuard>
   );
 }

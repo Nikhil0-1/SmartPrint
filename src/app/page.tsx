@@ -207,41 +207,34 @@ export default function LandingPage() {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
           {[
             {
-              step: '1',
-              title: 'Scan Kiosk QR',
-              desc: 'Point your camera at the Raspberry Pi HDMI monitor to launch your session.',
+              step: '01',
+              title: 'SCAN',
+              desc: 'Scan the kiosk QR code using your phone camera.',
               icon: QrCode,
               color: 'text-blue-600 bg-blue-50 border-blue-100',
             },
             {
-              step: '2',
-              title: 'Upload Document',
-              desc: 'Select your PDF or images. Page count is validated instantly on server.',
+              step: '02',
+              title: 'UPLOAD',
+              desc: 'Upload your document from your phone browser.',
               icon: UploadCloud,
               color: 'text-indigo-600 bg-indigo-50 border-indigo-100',
             },
             {
-              step: '3',
-              title: 'Choose Options',
-              desc: 'Pick copies, page ranges, and Color vs B&W with transparent live pricing.',
-              icon: Printer,
-              color: 'text-purple-600 bg-purple-50 border-purple-100',
-            },
-            {
-              step: '4',
-              title: 'Instant UPI Pay',
-              desc: 'Pay using Google Pay, PhonePe, or Paytm with verified webhook validation.',
+              step: '03',
+              title: 'PAY',
+              desc: 'Pay securely using UPI (Google Pay, PhonePe, Paytm).',
               icon: CreditCard,
               color: 'text-emerald-600 bg-emerald-50 border-emerald-100',
             },
             {
-              step: '5',
-              title: 'Collect & Purge',
-              desc: 'USB HP printer prints immediately. Customer file is permanently wiped.',
-              icon: CheckCircle2,
+              step: '04',
+              title: 'PRINT',
+              desc: 'Collect your document directly from the kiosk tray.',
+              icon: Printer,
               color: 'text-amber-600 bg-amber-50 border-amber-100',
             },
           ].map((item) => {
@@ -249,19 +242,19 @@ export default function LandingPage() {
             return (
               <div
                 key={item.step}
-                className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-sm hover:shadow-md transition-shadow relative flex flex-col justify-between"
+                className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs hover:shadow-md transition-shadow flex flex-col justify-between space-y-4"
               >
                 <div>
                   <div className="flex items-center justify-between mb-4">
-                    <span className="w-6 h-6 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center">
+                    <span className="font-mono text-sm font-black text-blue-600 bg-blue-50 border border-blue-200/60 px-2.5 py-1 rounded-lg">
                       {item.step}
                     </span>
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center border ${item.color}`}>
+                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center border ${item.color}`}>
                       <Icon className="w-5 h-5" />
                     </div>
                   </div>
-                  <h4 className="text-base font-bold text-slate-900 mb-1.5">{item.title}</h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">{item.desc}</p>
+                  <h4 className="text-lg font-black text-slate-900 mb-1">{item.title}</h4>
+                  <p className="text-xs text-slate-500 leading-relaxed font-medium">{item.desc}</p>
                 </div>
               </div>
             );

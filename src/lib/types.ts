@@ -66,19 +66,51 @@ export interface Kiosk {
   maintenance_mode: boolean;
 }
 
+export type PrinterType = 'BW' | 'COLOR' | 'BOTH' | 'BACKUP';
+
+export interface PrinterCapabilities {
+  color: boolean;
+  grayscale: boolean;
+  duplex: boolean;
+  paper_sizes: string[];
+  resolutions?: string[];
+  cups_state?: string;
+  queue_state?: string;
+  last_detected_at?: string;
+}
+
 export interface Printer {
   id: string;
   kiosk_id: string;
   printer_name: string;
+  display_name: string;
+  manufacturer: string;
   model: string;
   cups_queue_name: string;
-  connection_type: 'USB';
+  connection_type: 'USB' | 'IP' | 'NETWORK';
   status: PrinterStatus;
+  printer_type: PrinterType;
+  enabled: boolean;
+  priority: number;
   is_default: boolean;
   supports_color: boolean;
   supports_duplex: boolean;
+  capabilities?: PrinterCapabilities;
   last_test_print?: string;
   last_error?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PrinterRouting {
+  id: string;
+  kiosk_id: string;
+  bw_primary_printer_id?: string | null;
+  bw_backup_printer_id?: string | null;
+  color_primary_printer_id?: string | null;
+  color_backup_printer_id?: string | null;
+  auto_backup_enabled: boolean;
+  updated_at?: string;
 }
 
 export interface Session {

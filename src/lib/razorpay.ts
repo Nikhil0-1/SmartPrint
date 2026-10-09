@@ -8,6 +8,46 @@ export function getRazorpayKeyId(): string {
   return RAZORPAY_KEY_ID;
 }
 
+import Razorpay from 'razorpay';
+
+export const isRazorpayConfigured = (): boolean => {
+  return Boolean(
+    process.env.RAZORPAY_KEY_ID &&
+    process.env.RAZORPAY_KEY_SECRET &&
+    !process.env.RAZORPAY_KEY_ID.includes('rzp_test_gitam')
+  );
+};
+
+export const razorpayClient = process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET
+  ? new Razorpay({
+      key_id: RAZORPAY_KEY_ID,
+      key_secret: RAZORPAY_KEY_SECRET,
+    })
+  : null;
+
+export async function createRazorpayOrder(amountRupees: number, receiptId: string) {
+  const amountPaise = Math.round(amountRupees * 100);
+
+  if (razorpayClient && isRazorpayConfigured()) {
+    try {
+      const order = await razorpayClient.orders.create({
+        amount: amountPaise,
+        currency: 'INR',
+        receipt: receiptId,
+        notes: {
+          system: 'GITAM SMARTPRINT',
+          receipt: receiptId,
+        },
+      });
+      return order;
+    } catch (err) {
+      console.error('Real Razorpay order creation failed, falling back to test order:', err);
+    }
+  }
+
+  return createRazorpayOrderMock(amountRupees, receiptId);
+}
+
 export function createRazorpayOrderMock(amountRupees: number, receiptId: string) {
   // Amount in paise
   const amountPaise = Math.round(amountRupees * 100);

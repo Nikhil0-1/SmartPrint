@@ -1,0 +1,7 @@
+# GITAM SMARTPRINT - RASPBERRY PI 3B+ PYTHON DEPENDENCIES
+# Pinned lightweight packages for stable ARM Linux performance
+
+pycups==2.0.1
+requests==2.31.0
+urllib3==2.1.0
+psutil==5.9.8

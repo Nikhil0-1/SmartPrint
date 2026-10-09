@@ -19,56 +19,56 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "[1/5] Checking USB bus for connected HP Printers..."
-lsusb | grep -i "Hewlett-Packard\|HP" || {
-  echo "[-] WARNING: No HP device found on USB bus."
-  echo "    Please verify that:"
-  echo "    1. The USB cable is firmly plugged into the Raspberry Pi and the HP printer."
-  echo "    2. The printer is powered ON."
-  echo "    3. The USB indicator light is active."
+lsusb | grep -i "Hewlett-Packard\|HP\|Printer" || {
+  echo "[-] WARNING: No HP printer found on USB bus."
+  echo "    Please verify cable connection and power state."
 }
 
 echo "[2/5] Querying CUPS hardware interfaces (lpinfo)..."
-PRINTER_URI=$(lpinfo -v | grep -i "usb://.*hp" | awk '{print $2}' | head -n 1)
+mapfile -t DETECTED_URIS < <(lpinfo -v | grep -i "usb://" | awk '{print $2}')
 
-if [ -z "$PRINTER_URI" ]; then
-  echo "[!] Specific HP USB URI not found directly via regex. Looking for any USB printer URI..."
-  PRINTER_URI=$(lpinfo -v | grep -i "usb://" | awk '{print $2}' | head -n 1)
+if [ ${#DETECTED_URIS[@]} -eq 0 ]; then
+  echo "[-] Could not detect USB printer URIs via CUPS lpinfo."
+  echo "    Falling back to standard USB URI: usb://HP/LaserJet"
+  DETECTED_URIS=("usb://HP/LaserJet")
 fi
 
-if [ -z "$PRINTER_URI" ]; then
-  echo "[-] Could not detect a valid USB printer URI via CUPS lpinfo."
-  echo "    Falling back to standard generic USB URI: usb://HP/LaserJet"
-  PRINTER_URI="usb://HP/LaserJet"
-else
-  echo "[+] Detected Printer Device URI: $PRINTER_URI"
-fi
+echo "[+] Detected ${#DETECTED_URIS[@]} USB printer endpoint(s):"
+for index in "${!DETECTED_URIS[@]}"; do
+  echo "    [$((index+1))] ${DETECTED_URIS[$index]}"
+done
 
-echo "[3/5] Checking available HP PPD / Drivers..."
-# Look for hpcups driver or generic PPDF
+echo "[3/5] Configuring CUPS Queues for Multi-Printer Kiosk..."
+
+# Queue 1: B&W Primary Queue
+BW_QUEUE="smartprint_bw_01"
+BW_URI="${DETECTED_URIS[0]}"
 HPCUPS_DRIVER=$(lpinfo -m | grep -i "hpcups.*laserjet" | head -n 1 | awk '{print $1}')
-
 if [ -z "$HPCUPS_DRIVER" ]; then
-  echo "[!] Exact LaserJet hpcups driver not found, checking generic postscript / PCL..."
   HPCUPS_DRIVER="drv:///sample.drv/generic.ppd"
 fi
-echo "[+] Selected driver: $HPCUPS_DRIVER"
 
-echo "[4/5] Configuring CUPS Queue: $QUEUE_NAME..."
-# Remove old queue if exists
-lpadmin -x "$QUEUE_NAME" 2>/dev/null || true
+echo "[+] Registering B&W Queue: $BW_QUEUE -> $BW_URI"
+lpadmin -x "$BW_QUEUE" 2>/dev/null || true
+lpadmin -p "$BW_QUEUE" -E -v "$BW_URI" -m "$HPCUPS_DRIVER" -D "GITAM SmartPrint HP B&W Primary" -L "Kiosk 01 Tray 1"
+cupsenable "$BW_QUEUE"
+cupsaccept "$BW_QUEUE"
+lpoptions -p "$BW_QUEUE" -o media=A4 -o ColorModel=K
 
-# Add printer
-lpadmin -p "$QUEUE_NAME" -E -v "$PRINTER_URI" -m "$HPCUPS_DRIVER" -D "GITAM SmartPrint USB HP Printer" -L "Kiosk 01"
+# Queue 2: Color Primary Queue (if 2nd printer or color printer detected)
+COLOR_QUEUE="smartprint_color_01"
+COLOR_URI="${DETECTED_URIS[1]:-$BW_URI}"
+echo "[+] Registering Color Queue: $COLOR_QUEUE -> $COLOR_URI"
+lpadmin -x "$COLOR_QUEUE" 2>/dev/null || true
+lpadmin -p "$COLOR_QUEUE" -E -v "$COLOR_URI" -m "$HPCUPS_DRIVER" -D "GITAM SmartPrint HP Color Primary" -L "Kiosk 01 Tray 2"
+cupsenable "$COLOR_QUEUE"
+cupsaccept "$COLOR_QUEUE"
+lpoptions -p "$COLOR_QUEUE" -o media=A4 -o ColorModel=Color
 
-# Enable and accept jobs
-cupsenable "$QUEUE_NAME"
-cupsaccept "$QUEUE_NAME"
+# Set B&W as system default queue
+lpadmin -d "$BW_QUEUE"
 
-# Set as system default printer
-lpadmin -d "$QUEUE_NAME"
-
-# Set default media to A4
-lpoptions -p "$QUEUE_NAME" -o media=A4
+echo "[+] Multi-Printer CUPS queues successfully configured!"
 
 echo "[+] Printer queue '$QUEUE_NAME' registered and enabled!"
 

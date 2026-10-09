@@ -3,7 +3,18 @@ import { store } from '@/lib/store';
 
 export async function POST(request: Request) {
   try {
-    const kioskId = request.headers.get('x-kiosk-id') || (await request.clone().json()).kiosk_id;
+    // Try header first, then parse body once
+    const headerKioskId = request.headers.get('x-kiosk-id');
+    let kioskId = headerKioskId;
+    if (!kioskId) {
+      try {
+        const body = await request.json();
+        kioskId = body.kiosk_id;
+      } catch {
+        // no body is fine if header was provided
+      }
+    }
+
     if (!kioskId) {
       return NextResponse.json({ error: 'Kiosk identification required' }, { status: 401 });
     }

@@ -70,20 +70,44 @@ export async function validateAndExtractPages(
   };
 }
 
-export function saveTemporaryDocument(
+import { supabaseAdmin, BUCKET_NAME, isSupabaseConfigured } from './supabase';
+
+export async function saveTemporaryDocument(
   jobId: string,
   buffer: Buffer,
   mimeType: string,
   originalName: string
 ) {
+  // Always store in memory for immediate agent access
   temporaryDocStore.set(jobId, { buffer, mimeType, originalName });
+
+  // If Supabase is configured, upload to private print-temp storage bucket
+  if (isSupabaseConfigured()) {
+    try {
+      const filePath = `${jobId}/${originalName}`;
+      const { error } = await supabaseAdmin.storage
+        .from(BUCKET_NAME)
+        .upload(filePath, buffer, {
+          contentType: mimeType,
+          upsert: true,
+        });
+
+      if (error) {
+        store.logSystem('WARNING', 'CLEANUP', `Supabase bucket upload failed: ${error.message}`);
+      } else {
+        store.logSystem('INFO', 'CLEANUP', `Uploaded document to private bucket ${BUCKET_NAME}/${filePath}`);
+      }
+    } catch (err) {
+      store.logSystem('WARNING', 'CLEANUP', `Supabase upload error: ${(err as Error).message}`);
+    }
+  }
 }
 
 export function getTemporaryDocument(jobId: string) {
   return temporaryDocStore.get(jobId);
 }
 
-export function permanentlyDeleteDocument(jobId: string): boolean {
+export async function permanentlyDeleteDocument(jobId: string): Promise<boolean> {
   // 1. Wipe in-memory buffer
   const exists = temporaryDocStore.has(jobId);
   if (exists) {
@@ -95,10 +119,23 @@ export function permanentlyDeleteDocument(jobId: string): boolean {
     temporaryDocStore.delete(jobId);
   }
 
-  // 2. Mark database metadata deleted and erase storage path
+  // 2. Wipe from Supabase storage if active
+  if (isSupabaseConfigured()) {
+    try {
+      const jobFile = store.getAllJobs().find((j) => j.id === jobId);
+      if (jobFile?.original_filename) {
+        const filePath = `${jobId}/${jobFile.original_filename}`;
+        await supabaseAdmin.storage.from(BUCKET_NAME).remove([filePath]);
+      }
+    } catch (e) {
+      store.logSystem('WARNING', 'CLEANUP', `Failed removing from Supabase bucket: ${(e as Error).message}`);
+    }
+  }
+
+  // 3. Mark database metadata deleted and erase storage path
   store.deleteJobFile(jobId);
 
-  // 3. Verify deletion
+  // 4. Verify deletion
   const verify = temporaryDocStore.has(jobId);
   if (!verify) {
     store.logSystem('INFO', 'CLEANUP', `CLEANUP_VERIFIED: Document permanently destroyed for job ${jobId}`);

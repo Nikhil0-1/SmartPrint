@@ -3,6 +3,7 @@ import {
   PricingConfig,
   Kiosk,
   Printer,
+  PrinterRouting,
   Session,
   PrintJob,
   FileMetadata,
@@ -12,7 +13,7 @@ import {
   PrintJobStatus,
   PrinterStatus,
 } from './types';
-import { DEFAULT_BRANDING, DEFAULT_PRICING, INITIAL_KIOSKS, INITIAL_PRINTERS } from './constants';
+import { DEFAULT_BRANDING, DEFAULT_PRICING, INITIAL_KIOSKS, INITIAL_PRINTERS, INITIAL_PRINTER_ROUTING } from './constants';
 
 // In-Memory store fallback with Supabase sync capabilities
 class StateManager {
@@ -20,6 +21,7 @@ class StateManager {
   private pricing: PricingConfig = { ...DEFAULT_PRICING };
   private kiosks: Map<string, Kiosk> = new Map();
   private printers: Map<string, Printer> = new Map();
+  private routings: Map<string, PrinterRouting> = new Map();
   private sessions: Map<string, Session> = new Map();
   private jobs: Map<string, PrintJob> = new Map();
   private files: Map<string, FileMetadata> = new Map();
@@ -29,13 +31,14 @@ class StateManager {
 
   constructor() {
     INITIAL_KIOSKS.forEach((k) => this.kiosks.set(k.id, { ...k }));
-    INITIAL_PRINTERS.forEach((p) => this.printers.set(p.kiosk_id, { ...p }));
+    INITIAL_PRINTERS.forEach((p) => this.printers.set(p.id, { ...p }));
+    INITIAL_PRINTER_ROUTING.forEach((r) => this.routings.set(r.kiosk_id, { ...r }));
 
     this.logSystem(
       'INFO',
       'BACKEND',
-      'GITAM SMARTPRINT system initialized with default configuration',
-      { kiosksCount: this.kiosks.size }
+      'GITAM SMARTPRINT system initialized with multi-printer support',
+      { kiosksCount: this.kiosks.size, printersCount: this.printers.size }
     );
   }
 
@@ -117,24 +120,153 @@ class StateManager {
     return true;
   }
 
-  // --- PRINTERS ---
+  // --- PRINTERS & MULTI-PRINTER ARCHITECTURE ---
   getPrinters(): Printer[] {
     return Array.from(this.printers.values());
   }
 
-  getPrinterByKiosk(kioskId: string): Printer | undefined {
-    return this.printers.get(kioskId);
+  getPrintersByKiosk(kioskId: string): Printer[] {
+    return Array.from(this.printers.values()).filter((p) => p.kiosk_id === kioskId);
   }
 
-  updatePrinter(kioskId: string, updates: Partial<Printer>, adminEmail?: string): Printer | null {
-    const printer = this.printers.get(kioskId);
+  getPrinter(printerId: string): Printer | undefined {
+    return this.printers.get(printerId);
+  }
+
+  getPrinterByKiosk(kioskId: string): Printer | undefined {
+    // Return primary default printer for backward compatibility if needed
+    const list = this.getPrintersByKiosk(kioskId);
+    return list.find((p) => p.is_default && p.enabled) || list[0];
+  }
+
+  addPrinter(printer: Printer, adminEmail = 'admin@gitam.edu'): Printer {
+    this.printers.set(printer.id, printer);
+    this.logAudit(adminEmail, 'ADD_PRINTER', 'printers', printer.id, { ...printer });
+    return printer;
+  }
+
+  updatePrinter(printerId: string, updates: Partial<Printer>, adminEmail?: string): Printer | null {
+    const printer = this.printers.get(printerId) || Array.from(this.printers.values()).find((p) => p.kiosk_id === printerId);
     if (!printer) return null;
-    const updated = { ...printer, ...updates };
-    this.printers.set(kioskId, updated);
+    const updated = { ...printer, ...updates, updated_at: new Date().toISOString() };
+    this.printers.set(updated.id, updated);
     if (adminEmail) {
-      this.logAudit(adminEmail, 'UPDATE_PRINTER', 'printers', kioskId, updates);
+      this.logAudit(adminEmail, 'UPDATE_PRINTER', 'printers', updated.id, updates);
     }
     return updated;
+  }
+
+  // --- PRINTER ROUTING CONFIGURATION ---
+  getRouting(kioskId: string): PrinterRouting | undefined {
+    return this.routings.get(kioskId);
+  }
+
+  getAllRoutings(): PrinterRouting[] {
+    return Array.from(this.routings.values());
+  }
+
+  updateRouting(kioskId: string, updates: Partial<PrinterRouting>, adminEmail = 'admin@gitam.edu'): PrinterRouting {
+    const current = this.routings.get(kioskId) || {
+      id: `route_${kioskId}`,
+      kiosk_id: kioskId,
+      auto_backup_enabled: true,
+      updated_at: new Date().toISOString(),
+    };
+
+    const updated = { ...current, ...updates, updated_at: new Date().toISOString() };
+    this.routings.set(kioskId, updated);
+    this.logAudit(adminEmail, 'UPDATE_ROUTING', 'printer_routing', kioskId, updates);
+    return updated;
+  }
+
+  // --- SERVER-SIDE AUTOMATIC PRINTER SELECTION & SAFETY ROUTING ---
+  selectPrinterForJob(kioskId: string, isColor: boolean, isDuplex = false): {
+    success: boolean;
+    printer?: Printer;
+    is_backup_route?: boolean;
+    error_message?: string;
+  } {
+    const kiosk = this.kiosks.get(kioskId);
+    if (!kiosk || kiosk.status === 'DISABLED' || kiosk.status === 'MAINTENANCE') {
+      return {
+        success: false,
+        error_message: 'Kiosk is currently unavailable or undergoing maintenance.',
+      };
+    }
+
+    if (kiosk.disk_usage_percent && kiosk.disk_usage_percent >= 92.0) {
+      return {
+        success: false,
+        error_message: 'Kiosk storage full. Printing is temporarily paused.',
+      };
+    }
+
+    const routing = this.routings.get(kioskId);
+    const printers = this.getPrintersByKiosk(kioskId);
+
+    // 1. Identify Primary Candidate Printer ID
+    let targetPrinterId: string | null | undefined = null;
+    let backupPrinterId: string | null | undefined = null;
+
+    if (routing) {
+      if (isColor) {
+        targetPrinterId = routing.color_primary_printer_id;
+        backupPrinterId = routing.color_backup_printer_id;
+      } else {
+        targetPrinterId = routing.bw_primary_printer_id;
+        backupPrinterId = routing.bw_backup_printer_id;
+      }
+    }
+
+    let candidate = targetPrinterId ? this.printers.get(targetPrinterId) : undefined;
+
+    // Fallback search if no explicit routing configured yet
+    if (!candidate) {
+      candidate = printers.find(
+        (p) => p.enabled && (isColor ? p.supports_color : true)
+      );
+    }
+
+    // Helper to validate printer health and capabilities
+    const isPrinterUsable = (p: Printer | undefined): boolean => {
+      if (!p || !p.enabled) return false;
+      if (p.status === 'OFFLINE' || p.status === 'ERROR' || p.status === 'PAPER_OUT') return false;
+      if (isColor && !p.supports_color) return false;
+      if (isDuplex && !p.supports_duplex) return false;
+      return true;
+    };
+
+    // Check if Primary Printer is Usable
+    if (isPrinterUsable(candidate)) {
+      return { success: true, printer: candidate, is_backup_route: false };
+    }
+
+    // Attempt Backup Route if enabled
+    if (routing?.auto_backup_enabled && backupPrinterId) {
+      const backupCandidate = this.printers.get(backupPrinterId);
+      if (isPrinterUsable(backupCandidate)) {
+        this.logSystem(
+          'WARNING',
+          'BACKEND',
+          `ROUTING OVERRIDE: Primary printer ${candidate?.display_name || 'unassigned'} unavailable. Routing job to backup printer ${backupCandidate!.display_name}`,
+          { kiosk_id: kioskId, is_color: isColor }
+        );
+        return { success: true, printer: backupCandidate!, is_backup_route: true };
+      }
+    }
+
+    // Otherwise, attempt to find any enabled printer matching requested capabilities
+    const fallbackPrinter = printers.find((p) => isPrinterUsable(p));
+    if (fallbackPrinter) {
+      return { success: true, printer: fallbackPrinter, is_backup_route: true };
+    }
+
+    // If no candidate available, return safe human-friendly error
+    const reqType = isColor ? 'Color' : 'Black & white';
+    return {
+      success: false,
+      error_message: `${reqType} printing is temporarily unavailable.`,
+    };
   }
 
   // --- SESSIONS ---

@@ -35,6 +35,8 @@ export async function GET() {
   const failedJobs = jobs.filter((j) => j.status === 'FAILED');
   const recoveryRequired = jobs.filter((j) => j.status === 'RECOVERY_REQUIRED');
 
+  const routings = store.getAllRoutings();
+
   return NextResponse.json({
     stats: {
       total_prints: completedJobs.length,
@@ -43,12 +45,13 @@ export async function GET() {
       total_revenue: totalRevenue,
       active_kiosks: kiosks.length,
       online_kiosks: kiosks.filter((k) => k.status === 'ONLINE').length,
-      online_printers: printers.filter((p) => p.status === 'READY').length,
+      online_printers: printers.filter((p) => p.status === 'READY' && p.enabled).length,
       failed_jobs: failedJobs.length,
       recovery_required: recoveryRequired.length,
     },
     kiosks,
     printers,
+    routings,
     jobs,
     payments,
     branding,
