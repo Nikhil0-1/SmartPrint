@@ -223,6 +223,8 @@ export default function KioskMonitorPage({
   const monitorState: KioskMonitorState = data?.monitor_state || 'IDLE';
   const activeJob = data?.active_job;
 
+  const displayOrg = branding.organization.replace(new RegExp(`\\s*${branding.product}$`, 'i'), '').trim() || branding.organization;
+
   // Permanent Kiosk QR Target URL (Public entry point - Never cycling session tokens in QR)
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const permanentQrTarget =
@@ -231,24 +233,24 @@ export default function KioskMonitorPage({
       : `${origin}/print?kiosk=${kioskId}`;
 
   return (
-    <div className="h-screen w-screen bg-[#fafbfc] text-slate-900 flex flex-col justify-between p-6 select-none cursor-none overflow-hidden font-sans fixed inset-0 border-8 border-slate-100">
+    <div className="h-screen w-screen bg-[#fafbfc] text-slate-900 flex flex-col justify-between p-3 sm:p-5 select-none cursor-none overflow-hidden font-sans fixed inset-0 border-4 sm:border-8 border-slate-100">
       {/* 1. TOP HEADER (PREMIUM WHITE WITH GOLD ACCENT) */}
-      <header className="flex items-center justify-between bg-white px-6 py-4 rounded-2xl shadow-sm border border-slate-200/80 shrink-0">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0">
-            <Printer className="w-7 h-7 text-amber-600" />
+      <header className="flex items-center justify-between bg-white px-5 py-3 rounded-2xl shadow-sm border border-slate-200/80 shrink-0 relative z-20">
+        <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+          <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0">
+            <Printer className="w-6 h-6 sm:w-7 sm:h-7 text-amber-600" />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-black tracking-tight text-slate-900">
-                {branding.organization}{' '}
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900">
+                {displayOrg}{' '}
                 <span className="text-amber-600">{branding.product}</span>
               </h1>
               <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
                 Kiosk Mode
               </span>
             </div>
-            <p className="text-xs font-medium text-slate-500 tracking-wide">
+            <p className="text-xs font-medium text-slate-500 tracking-wide truncate">
               {branding.primary_tagline} • {data?.kiosk?.location || 'Campus Knowledge Center'}
             </p>
           </div>
@@ -269,87 +271,90 @@ export default function KioskMonitorPage({
       </header>
 
       {/* 2. MAIN WORKSPACE: STRICT MONITOR STATE MACHINE */}
-      <main className="flex-1 flex items-center justify-center py-4 min-h-0">
+      <main className="flex-1 flex items-center justify-center py-2 sm:py-4 px-2 min-h-0 overflow-y-auto relative z-10 w-full">
         {/* ============================================================== */}
         {/* STATE A: IDLE (STRICTLY STATIC UNTIL A VALID DOCUMENT IS UPLOADED) */}
         {/* ============================================================== */}
         {monitorState === 'IDLE' && (
-          <div className="flex flex-col lg:flex-row items-center justify-center gap-12 max-w-5xl w-full">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-5 lg:gap-8 items-center max-w-5xl w-full my-auto px-2">
             {/* PERMANENT QR CODE CARD */}
-            <div className="bg-white p-7 rounded-3xl shadow-lg border-2 border-amber-500/40 flex flex-col items-center justify-center relative shrink-0">
-              <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-inner">
-                <QRCodeSVG
-                  value={permanentQrTarget}
-                  size={270}
-                  level="H"
-                  includeMargin={false}
-                />
-              </div>
+            <div className="md:col-span-5 flex justify-center">
+              <div className="bg-white p-4 sm:p-5 rounded-2xl sm:rounded-3xl shadow-lg border-2 border-amber-500/40 flex flex-col items-center justify-center w-full max-w-[270px]">
+                <div className="bg-white p-2.5 rounded-xl border border-slate-100 shadow-inner flex items-center justify-center">
+                  <QRCodeSVG
+                    value={permanentQrTarget}
+                    size={185}
+                    level="H"
+                    includeMargin={false}
+                    className="w-40 h-40 sm:w-44 sm:h-44"
+                  />
+                </div>
 
-              <div className="mt-4 text-center">
-                <span className="text-xs font-black text-slate-900 uppercase tracking-widest block">
-                  SCAN TO START PRINTING
-                </span>
-                <span className="text-[11px] font-medium text-slate-500 block mt-0.5">
-                  Point phone camera at QR code
-                </span>
+                <div className="mt-3 text-center">
+                  <span className="text-[11px] sm:text-xs font-black text-slate-900 uppercase tracking-widest block">
+                    SCAN TO START PRINTING
+                  </span>
+                  <span className="text-[10px] sm:text-[11px] font-medium text-slate-500 block mt-0.5">
+                    Point phone camera at QR code
+                  </span>
+                </div>
               </div>
             </div>
 
             {/* STATIC INSTRUCTIONS & 4-STEP SEQUENCE */}
-            <div className="space-y-5 max-w-lg text-left">
-              <div className="space-y-1.5">
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 border border-amber-200/80 text-amber-800 text-xs font-bold tracking-wide">
+            <div className="md:col-span-7 space-y-3 sm:space-y-4 text-left">
+              <div className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-50 border border-amber-200/80 text-amber-800 text-[11px] font-bold tracking-wide">
                   <Sparkles className="w-3.5 h-3.5 text-amber-600" />
                   <span>Autonomous Touchless Printing</span>
                 </div>
-                <h2 className="text-3xl sm:text-4xl font-black tracking-tight text-slate-900 leading-tight">
+                <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 leading-tight">
                   Scan. Upload. Pay. Print.
                 </h2>
-                <p className="text-sm text-slate-600 leading-relaxed font-normal">
+                <p className="text-xs sm:text-sm text-slate-600 leading-relaxed font-normal">
                   No app download or kiosk touch required. Upload your document securely from your phone, complete payment, and collect your pages instantly.
                 </p>
               </div>
 
-              {/* 4-Step Visual Sequence */}
-              <div className="space-y-2 text-xs text-slate-700">
-                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+              {/* 4-Step Visual Sequence - 2x2 grid for clean compact display */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-700">
+                <div className="flex items-center gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
                   <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     1
                   </span>
-                  <div>
-                    <span className="font-bold text-slate-900">SCAN & UPLOAD</span>
-                    <span className="text-slate-500 block text-[11px]">Scan QR code above with phone & select PDF, JPG or PNG</span>
+                  <div className="min-w-0">
+                    <span className="font-bold text-slate-900 block truncate text-[11px]">SCAN & UPLOAD</span>
+                    <span className="text-slate-500 block text-[10px] truncate">Scan QR & upload PDF or JPG</span>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+                <div className="flex items-center gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
                   <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     2
                   </span>
-                  <div>
-                    <span className="font-bold text-slate-900">CONFIGURE PAGES</span>
-                    <span className="text-slate-500 block text-[11px]">Select page ranges, number of copies, and color or B&W</span>
+                  <div className="min-w-0">
+                    <span className="font-bold text-slate-900 block truncate text-[11px]">CONFIGURE PAGES</span>
+                    <span className="text-slate-500 block text-[10px] truncate">Select pages, copies & color</span>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+                <div className="flex items-center gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
                   <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     3
                   </span>
-                  <div>
-                    <span className="font-bold text-slate-900">INSTANT UPI PAYMENT</span>
-                    <span className="text-slate-500 block text-[11px]">Pay securely on mobile via Razorpay UPI, GPay or PhonePe</span>
+                  <div className="min-w-0">
+                    <span className="font-bold text-slate-900 block truncate text-[11px]">INSTANT UPI PAYMENT</span>
+                    <span className="text-slate-500 block text-[10px] truncate">Pay with UPI, GPay, PhonePe</span>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+                <div className="flex items-center gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
                   <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     4
                   </span>
-                  <div>
-                    <span className="font-bold text-slate-900">COLLECT PRINTOUT</span>
-                    <span className="text-slate-500 block text-[11px]">Laser printer delivers pages; files are instantly destroyed</span>
+                  <div className="min-w-0">
+                    <span className="font-bold text-slate-900 block truncate text-[11px]">COLLECT PRINTOUT</span>
+                    <span className="text-slate-500 block text-[10px] truncate">Laser print & instant shred</span>
                   </div>
                 </div>
               </div>
@@ -579,48 +584,48 @@ export default function KioskMonitorPage({
       </main>
 
       {/* 3. BOTTOM STRIP: HARDWARE STATUS, PRICING & ZERO-RETENTION FOOTER */}
-      <footer className="border-t border-slate-200 bg-white p-4 rounded-2xl shadow-sm space-y-3 shrink-0">
+      <footer className="border-t border-slate-200 bg-white p-2.5 sm:p-3.5 rounded-2xl shadow-sm space-y-2 shrink-0 relative z-20">
         {/* Telemetry and Pricing Strip */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
-            <Printer className="w-4 h-4 text-emerald-600" />
-            <span className="font-semibold text-slate-600">Printer:</span>
-            <span className="font-bold text-emerald-700 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          <div className="flex items-center justify-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl py-1.5 px-3">
+            <Printer className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <span className="font-semibold text-slate-600 text-[11px]">Printer:</span>
+            <span className="font-bold text-emerald-700 flex items-center gap-1.5 text-[11px]">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
               <span>{printer.status}</span>
             </span>
           </div>
 
-          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
-            <Wifi className="w-4 h-4 text-emerald-600" />
-            <span className="font-semibold text-slate-600">Service:</span>
-            <span className="font-bold text-emerald-700 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <div className="flex items-center justify-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl py-1.5 px-3">
+            <Wifi className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <span className="font-semibold text-slate-600 text-[11px]">Service:</span>
+            <span className="font-bold text-emerald-700 flex items-center gap-1.5 text-[11px]">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
               <span>{networkError ? 'OFFLINE' : 'ONLINE'}</span>
             </span>
           </div>
 
-          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
-            <span className="font-semibold text-slate-600">B&W Pages:</span>
-            <span className="font-bold text-slate-900">₹{pricing.bw_price_per_page}/page</span>
+          <div className="flex items-center justify-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl py-1.5 px-3">
+            <span className="font-semibold text-slate-600 text-[11px]">B&W Pages:</span>
+            <span className="font-bold text-slate-900 text-[11px]">₹{pricing.bw_price_per_page}/page</span>
           </div>
 
-          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
-            <span className="font-semibold text-slate-600">Colour Pages:</span>
-            <span className="font-bold text-amber-700">₹{pricing.color_price_per_page}/page</span>
+          <div className="flex items-center justify-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl py-1.5 px-3">
+            <span className="font-semibold text-slate-600 text-[11px]">Colour Pages:</span>
+            <span className="font-bold text-amber-700 text-[11px]">₹{pricing.color_price_per_page}/page</span>
           </div>
         </div>
 
         {/* Privacy + Support + Powered By Details */}
-        <div className="flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-2 pt-1 border-t border-slate-100">
-          <div className="flex items-center gap-2 font-medium text-slate-700">
-            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+        <div className="flex flex-col sm:flex-row items-center justify-between text-[11px] text-slate-500 gap-1.5 pt-1.5 border-t border-slate-100">
+          <div className="flex items-center gap-1.5 font-medium text-slate-700">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
             <span>Zero-Retention File Privacy: Ephemeral storage only</span>
           </div>
 
-          <div className="flex items-center gap-5">
-            <div className="flex items-center gap-1.5 text-slate-700">
-              <Phone className="w-3.5 h-3.5 text-amber-600" />
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-1 text-slate-700">
+              <Phone className="w-3 h-3 text-amber-600 shrink-0" />
               <span>
                 Support: <strong className="text-slate-900 font-bold">{branding.support_number}</strong>
               </span>

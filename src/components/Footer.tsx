@@ -19,6 +19,8 @@ export function Footer({
   supportNumber = DEFAULT_BRANDING.support_number,
   poweredBy = DEFAULT_BRANDING.powered_by,
 }: FooterProps) {
+  const displayOrg = organization.replace(new RegExp(`\\s*${product}$`, 'i'), '').trim() || organization;
+
   return (
     <footer className="w-full bg-[#0d253f] text-slate-300 py-8 px-4 border-t border-slate-800">
       <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
@@ -26,7 +28,7 @@ export function Footer({
         <div className="text-center md:text-left space-y-1">
           <div className="flex items-center justify-center md:justify-start gap-2">
             <span className="font-extrabold text-white text-lg tracking-wide">
-              {organization} {product}
+              {displayOrg} <span className="text-amber-400">{product}</span>
             </span>
             <span className="bg-blue-600 text-[10px] font-bold text-white px-2 py-0.5 rounded-full">
               SECURE KIOSK

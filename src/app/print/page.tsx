@@ -268,7 +268,8 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
             </div>
             <div>
               <span className="font-extrabold text-sm tracking-wide block leading-none">
-                {branding.organization} {branding.product}
+                {branding.organization.replace(new RegExp(`\\s*${branding.product}$`, 'i'), '').trim() || branding.organization}{' '}
+                <span className="text-amber-400">{branding.product}</span>
               </span>
               <span className="text-[10px] text-slate-400 font-medium tracking-tight">
                 Kiosk: <strong className="text-sky-300">{kioskId}</strong>
