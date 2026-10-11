@@ -1,0 +1,18 @@
+[Unit]
+Description=GITAM SMARTPRINT Raspberry Pi Health Monitor Service
+Documentation=https://github.com/Nikhil0-1/SmartPrint/blob/main/docs/RASPBERRY_PI_SETUP.md
+After=network-online.target cups.service smartprint-agent.service
+Wants=network-online.target
+Requires=smartprint-agent.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/smartprint
+ExecStart=/bin/bash /opt/smartprint/raspberry-pi/scripts/health_check.sh
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

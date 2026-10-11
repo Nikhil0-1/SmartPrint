@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { store } from '@/lib/store';
-import { createRazorpayOrder, getRazorpayKeyId } from '@/lib/razorpay';
+import { store, GITAM_ORG_ID } from '@/lib/store';
+import { createMultiTenantRazorpayOrder, getPublicRazorpayKeyId } from '@/lib/razorpay';
 
 export async function POST(request: Request) {
   try {
@@ -15,12 +15,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 });
     }
 
-    if (job.status !== 'UPLOAD_COMPLETE') {
+    if (job.status !== 'UPLOAD_COMPLETE' && job.status !== 'VALIDATING') {
       return NextResponse.json(
         { error: `Job is in status '${job.status}' and cannot receive payment.` },
         { status: 400 }
       );
     }
+
+    const organizationId = job.organization_id || GITAM_ORG_ID;
 
     // SERVER-SIDE PRINTER ROUTING SAFETY CHECK
     // Verify printer availability before accepting payment
@@ -38,18 +40,44 @@ export async function POST(request: Request) {
     // Assign chosen printer to job
     job.printer_id = printerCheck.printer.id;
 
-    // Create Razorpay Order
-    const order = await createRazorpayOrder(job.calculated_amount, job.id);
-    store.createPayment(job.id, order.id, job.calculated_amount, 'INR');
+    const amountPaise = job.amount_paise || Math.round(job.calculated_amount * 100);
+
+    // Create Order with organization's configured Razorpay credentials
+    const order = await createMultiTenantRazorpayOrder(
+      organizationId,
+      amountPaise,
+      job.id,
+      {
+        kiosk_id: job.kiosk_id,
+        printer_id: printerCheck.printer.id,
+      }
+    );
+
+    // Register payment order in ledger
+    store.createPaymentOrder({
+      id: `po_${order.id}`,
+      organization_id: organizationId,
+      job_id: job.id,
+      razorpay_order_id: order.id,
+      amount_paise: amountPaise,
+      currency: 'INR',
+      status: 'CREATED',
+      created_at: new Date().toISOString(),
+    });
+
+    store.createPayment(job.id, order.id, job.calculated_amount, 'INR', organizationId);
+    store.updateJobStatus(job.id, 'PAYMENT_PENDING');
 
     return NextResponse.json({
       success: true,
       order_id: order.id,
       amount: order.amount,
       amount_rupees: job.calculated_amount,
+      amount_paise: amountPaise,
       currency: 'INR',
-      key_id: getRazorpayKeyId(),
+      key_id: getPublicRazorpayKeyId(organizationId),
       job_id: job.id,
+      organization_id: organizationId,
       printer_assigned: printerCheck.printer.display_name,
     });
   } catch (error) {

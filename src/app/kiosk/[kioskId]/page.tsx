@@ -1,37 +1,79 @@
 'use client';
 
-import React, { useState, useEffect, use } from 'react';
+import React, { useState, useEffect, use, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Printer,
   Wifi,
-  Monitor,
-  CheckCircle2,
-  AlertTriangle,
-  RefreshCw,
+  ShieldCheck,
   Phone,
   Clock,
   Sparkles,
-  ShieldCheck,
   CreditCard,
-  FileCheck,
-  Zap,
+  FileCheck2,
+  AlertTriangle,
+  RotateCcw,
+  CheckCircle2,
+  Check,
+  FileText,
+  HelpCircle,
 } from 'lucide-react';
-import { DEFAULT_BRANDING, DEFAULT_PRICING } from '@/lib/constants';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { KioskMonitorState } from '@/lib/types';
 
-type KioskScreenState =
-  | 'READY'
-  | 'CUSTOMER_CONNECTED'
-  | 'UPLOAD_RECEIVED'
-  | 'PAYMENT_PENDING'
-  | 'PAYMENT_VERIFIED'
-  | 'PROCESSING'
-  | 'PRINTING'
-  | 'COMPLETED'
-  | 'ERROR'
-  | 'MAINTENANCE';
+interface KioskStatusData {
+  kiosk: {
+    id: string;
+    name: string;
+    location: string;
+    status: string;
+    maintenance_mode: boolean;
+    permanent_qr_url: string;
+    active_job_id: string | null;
+  };
+  monitor_state: KioskMonitorState;
+  sub_message?: string;
+  active_job: {
+    masked_id: string;
+    status: string;
+    pages_total: number;
+    copies: number;
+    is_color: boolean;
+    is_duplex: boolean;
+    paper_size: string;
+    created_at: string;
+    completed_at?: string;
+    error_message?: string;
+  } | null;
+  branding: {
+    organization: string;
+    product: string;
+    logo_url?: string;
+    primary_tagline: string;
+    secondary_tagline: string;
+    support_number: string;
+    powered_by: string;
+    brand_colors: {
+      primary: string;
+      secondary: string;
+      accent: string;
+      bg: string;
+    };
+  };
+  pricing: {
+    bw_price_per_page: number;
+    color_price_per_page: number;
+    currency: string;
+  };
+  printer: {
+    status: string;
+    display_name: string;
+    model: string;
+    supports_color: boolean;
+  };
+}
 
-export default function KioskDisplayPage({
+export default function KioskMonitorPage({
   params,
 }: {
   params: Promise<{ kioskId: string }>;
@@ -39,18 +81,11 @@ export default function KioskDisplayPage({
   const resolvedParams = use(params);
   const kioskId = resolvedParams.kioskId || 'GITAM-SPK-001';
 
-  const [branding, setBranding] = useState(DEFAULT_BRANDING);
-  const [pricing, setPricing] = useState(DEFAULT_PRICING);
-  const [session, setSession] = useState<{ id: string; session_token: string; expires_at: string } | null>(null);
-  const [timeLeftSec, setTimeLeftSec] = useState<number>(900); // 15 mins default
-  const [printerStatus, setPrinterStatus] = useState<string>('READY');
-  const [systemOnline, setSystemOnline] = useState<boolean>(true);
+  const [data, setData] = useState<KioskStatusData | null>(null);
   const [currentTime, setCurrentTime] = useState<string>('');
-
-  // Active Job State
-  const [activeJob, setActiveJob] = useState<any>(null);
-  const [kioskState, setKioskState] = useState<KioskScreenState>('READY');
-  const [completedCountdown, setCompletedCountdown] = useState<number>(6);
+  const [completedCountdown, setCompletedCountdown] = useState<number>(8);
+  const [realtimeConnected, setRealtimeConnected] = useState<boolean>(false);
+  const [networkError, setNetworkError] = useState<boolean>(false);
 
   // Live Clock Tick
   useEffect(() => {
@@ -70,415 +105,532 @@ export default function KioskDisplayPage({
     return () => clearInterval(timer);
   }, []);
 
-  // Fetch Session QR & Brand Config
-  const refreshSession = async () => {
+  // Fetch Authoritative Kiosk State from dedicated endpoint
+  const fetchAuthoritativeState = useCallback(async () => {
     try {
-      const res = await fetch('/api/kiosk/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kiosk_id: kioskId }),
+      const res = await fetch(`/api/kiosk/${kioskId}/status`, {
+        cache: 'no-store',
       });
-      const data = await res.json();
-      if (data.session) {
-        setSession(data.session);
-        const expires = new Date(data.session.expires_at).getTime();
-        const now = Date.now();
-        setTimeLeftSec(Math.max(0, Math.floor((expires - now) / 1000)));
-      }
+      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+      const json: KioskStatusData = await res.json();
+      setData(json);
+      setNetworkError(false);
     } catch (err) {
-      console.error('Session refresh error:', err);
+      console.warn('[KIOSK MONITOR] Status fetch warning:', err);
+      setNetworkError(true);
     }
-  };
-
-  useEffect(() => {
-    fetch('/api/branding')
-      .then((res) => res.json())
-      .then((d) => d.branding && setBranding(d.branding))
-      .catch(() => {});
-
-    fetch('/api/pricing')
-      .then((res) => res.json())
-      .then((d) => d.pricing && setPricing(d.pricing))
-      .catch(() => {});
-
-    refreshSession();
   }, [kioskId]);
 
-  // Session timer countdown
+  // Initial fetch and resilient heartbeat poll
   useEffect(() => {
-    const timer = setInterval(() => {
-      setTimeLeftSec((prev) => {
-        if (prev <= 1) {
-          refreshSession();
-          return 900;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [kioskId]);
+    fetchAuthoritativeState();
+    const interval = setInterval(fetchAuthoritativeState, 3000);
+    return () => clearInterval(interval);
+  }, [fetchAuthoritativeState]);
 
-  // Periodic Backend Polling for Kiosk Status & Active Job Lifecycle
+  // Supabase Realtime Subscription for instant state transition upon upload/payment
   useEffect(() => {
-    const pollInterval = setInterval(async () => {
-      try {
-        const res = await fetch('/api/admin/data');
-        const data = await res.json();
-        setSystemOnline(true);
+    if (!isSupabaseConfigured()) {
+      setRealtimeConnected(true);
+      return;
+    }
 
-        const thisKiosk = data.kiosks?.find((k: any) => k.id === kioskId);
-        if (thisKiosk?.maintenance_mode || thisKiosk?.status === 'MAINTENANCE') {
-          setKioskState('MAINTENANCE');
-          return;
-        }
-
-        const thisPrinter = data.printers?.find((p: any) => p.kiosk_id === kioskId);
-        if (thisPrinter) {
-          setPrinterStatus(thisPrinter.status);
-          if (thisPrinter.status === 'ERROR' || thisPrinter.status === 'OFFLINE') {
-            setKioskState('ERROR');
-            return;
+    try {
+      const channel = supabase
+        .channel(`kiosk-monitor-${kioskId}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'print_jobs',
+            filter: `kiosk_id=eq.${kioskId}`,
+          },
+          () => {
+            fetchAuthoritativeState();
           }
-        }
-
-        // Determine if an active job is targeting this kiosk
-        const jobs = data.jobs || [];
-        const runningJob = jobs.find(
-          (j: any) =>
-            j.kiosk_id === kioskId &&
-            ['PAYMENT_PENDING', 'PAYMENT_VERIFIED', 'DOWNLOADING', 'PROCESSING', 'SUBMITTED_TO_CUPS', 'PRINTING', 'COMPLETED'].includes(j.status)
-        );
-
-        if (runningJob) {
-          setActiveJob(runningJob);
-          if (runningJob.status === 'PAYMENT_PENDING') {
-            setKioskState('PAYMENT_PENDING');
-          } else if (runningJob.status === 'PAYMENT_VERIFIED') {
-            setKioskState('PAYMENT_VERIFIED');
-          } else if (['DOWNLOADING', 'PROCESSING', 'SUBMITTED_TO_CUPS'].includes(runningJob.status)) {
-            setKioskState('PROCESSING');
-          } else if (runningJob.status === 'PRINTING') {
-            setKioskState('PRINTING');
-          } else if (runningJob.status === 'COMPLETED') {
-            setKioskState('COMPLETED');
+        )
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'kiosks',
+            filter: `id=eq.${kioskId}`,
+          },
+          () => {
+            fetchAuthoritativeState();
           }
-        } else {
-          setActiveJob(null);
-          setKioskState('READY');
-        }
-      } catch (e) {
-        setSystemOnline(false);
-      }
-    }, 2500);
+        )
+        .subscribe((status) => {
+          setRealtimeConnected(status === 'SUBSCRIBED');
+        });
 
-    return () => clearInterval(pollInterval);
-  }, [kioskId]);
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    } catch {
+      setRealtimeConnected(true);
+    }
+  }, [kioskId, fetchAuthoritativeState]);
 
-  // Auto-reset from COMPLETED state to READY after countdown
+  // Handle COMPLETED state automatic timeout back to static IDLE
   useEffect(() => {
-    if (kioskState === 'COMPLETED') {
-      setCompletedCountdown(6);
+    if (data?.monitor_state === 'COMPLETED') {
+      setCompletedCountdown(8);
       const timer = setInterval(() => {
         setCompletedCountdown((prev) => {
           if (prev <= 1) {
-            setKioskState('READY');
-            setActiveJob(null);
-            refreshSession();
-            return 6;
+            // Tell backend to reset kiosk active job to IDLE
+            fetch(`/api/kiosk/${kioskId}/status`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'reset_idle' }),
+            }).then(() => fetchAuthoritativeState());
+            return 8;
           }
           return prev - 1;
         });
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [kioskState]);
+  }, [data?.monitor_state, kioskId, fetchAuthoritativeState]);
 
-  // Dynamic QR Code Target URL with secure session token route
-  const qrTargetUrl = typeof window !== 'undefined'
-    ? `${window.location.origin}/print/session/${session?.session_token || 'sess_demo_001'}`
-    : `http://localhost:3000/print/session/${session?.session_token || 'sess_demo_001'}`;
+  // Fallbacks if data loading
+  const branding = data?.branding || {
+    organization: 'GITAM',
+    product: 'SMARTPRINT',
+    primary_tagline: 'Autonomous Student Printing',
+    secondary_tagline: 'Scan. Upload. Pay. Print.',
+    support_number: '9006496970',
+    powered_by: 'Nikhil',
+    brand_colors: { primary: '#0d253f', secondary: '#1e40af', accent: '#d97706', bg: '#ffffff' },
+  };
+
+  const pricing = data?.pricing || {
+    bw_price_per_page: 1.0,
+    color_price_per_page: 5.0,
+    currency: 'INR',
+  };
+
+  const printer = data?.printer || {
+    status: 'READY',
+    display_name: 'HP LaserJet USB',
+    model: 'LaserJet Pro',
+    supports_color: false,
+  };
+
+  const monitorState: KioskMonitorState = data?.monitor_state || 'IDLE';
+  const activeJob = data?.active_job;
+
+  // Permanent Kiosk QR Target URL (Public entry point - Never cycling session tokens in QR)
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const permanentQrTarget =
+    data?.kiosk?.permanent_qr_url && origin
+      ? `${origin}${data.kiosk.permanent_qr_url}`
+      : `${origin}/print?kiosk=${kioskId}`;
 
   return (
-    <div className="h-screen w-screen bg-gradient-to-b from-[#0d253f] via-[#102d4d] to-[#0a1c2f] text-white flex flex-col justify-between p-6 select-none cursor-none overflow-hidden font-sans fixed inset-0">
-      {/* 1. TOP HEADER (FIXED, NON-SCROLLING) */}
-      <header className="flex items-center justify-between border-b border-slate-700/60 pb-4 shrink-0">
+    <div className="h-screen w-screen bg-[#fafbfc] text-slate-900 flex flex-col justify-between p-6 select-none cursor-none overflow-hidden font-sans fixed inset-0 border-8 border-slate-100">
+      {/* 1. TOP HEADER (PREMIUM WHITE WITH GOLD ACCENT) */}
+      <header className="flex items-center justify-between bg-white px-6 py-4 rounded-2xl shadow-sm border border-slate-200/80 shrink-0">
         <div className="flex items-center gap-4">
-          <div className="w-14 h-14 rounded-2xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/25 shrink-0">
-            <Printer className="w-8 h-8 text-white" />
+          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0">
+            <Printer className="w-7 h-7 text-amber-600" />
           </div>
           <div>
-            <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white flex items-center gap-2">
-              {branding.organization} <span className="text-blue-400">{branding.product}</span>
-            </h1>
-            <p className="text-xs sm:text-sm text-slate-300 font-semibold tracking-wider">
-              {branding.primary_tagline}
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-black tracking-tight text-slate-900">
+                {branding.organization}{' '}
+                <span className="text-amber-600">{branding.product}</span>
+              </h1>
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
+                Kiosk Mode
+              </span>
+            </div>
+            <p className="text-xs font-medium text-slate-500 tracking-wide">
+              {branding.primary_tagline} • {data?.kiosk?.location || 'Campus Knowledge Center'}
             </p>
           </div>
         </div>
 
-        {/* Live Clock & Kiosk ID */}
+        {/* Live Clock & Kiosk Identifier */}
         <div className="text-right shrink-0">
-          <div className="text-2xl sm:text-3xl font-mono font-black text-white tracking-widest">
+          <div className="text-2xl font-mono font-black text-slate-900 tracking-widest">
             {currentTime}
           </div>
-          <div className="text-xs font-semibold text-slate-400">
-            Kiosk ID: <strong className="text-sky-300 font-mono">{kioskId}</strong>
+          <div className="text-xs font-semibold text-slate-500 flex items-center justify-end gap-1.5">
+            <span>KIOSK ID:</span>
+            <strong className="text-slate-800 font-mono bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+              {kioskId}
+            </strong>
           </div>
         </div>
       </header>
 
-      {/* 2. MAIN CENTER CONTENT BASED ON STATE */}
+      {/* 2. MAIN WORKSPACE: STRICT MONITOR STATE MACHINE */}
       <main className="flex-1 flex items-center justify-center py-4 min-h-0">
-        {/* STATE: READY (DEFAULT SCREEN) */}
-        {kioskState === 'READY' && (
-          <div className="flex flex-col lg:flex-row items-center justify-center gap-10 max-w-5xl w-full">
-            {/* LARGE DYNAMIC QR CODE CARD ON LEFT */}
-            <div className="bg-white p-6 rounded-3xl shadow-2xl border-4 border-blue-500/60 flex flex-col items-center justify-center relative glow-card shrink-0">
-              <div className="bg-white p-2.5 rounded-2xl">
+        {/* ============================================================== */}
+        {/* STATE A: IDLE (STRICTLY STATIC UNTIL A VALID DOCUMENT IS UPLOADED) */}
+        {/* ============================================================== */}
+        {monitorState === 'IDLE' && (
+          <div className="flex flex-col lg:flex-row items-center justify-center gap-12 max-w-5xl w-full">
+            {/* PERMANENT QR CODE CARD */}
+            <div className="bg-white p-7 rounded-3xl shadow-lg border-2 border-amber-500/40 flex flex-col items-center justify-center relative shrink-0">
+              <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-inner">
                 <QRCodeSVG
-                  value={qrTargetUrl}
-                  size={260}
+                  value={permanentQrTarget}
+                  size={270}
                   level="H"
                   includeMargin={false}
                 />
               </div>
 
-              {/* SCAN TO START PRINTING BANNER */}
-              <div className="mt-3 text-center">
+              <div className="mt-4 text-center">
                 <span className="text-xs font-black text-slate-900 uppercase tracking-widest block">
                   SCAN TO START PRINTING
                 </span>
-                <span className="text-[11px] font-semibold text-slate-500 flex items-center justify-center gap-1 mt-0.5">
-                  <Clock className="w-3 h-3 text-blue-600" />
-                  <span>Refreshes in {Math.floor(timeLeftSec / 60)}m {timeLeftSec % 60}s</span>
+                <span className="text-[11px] font-medium text-slate-500 block mt-0.5">
+                  Point phone camera at QR code
                 </span>
               </div>
             </div>
 
-            {/* INSTRUCTIONS & VISUAL SEQUENCE ON RIGHT */}
-            <div className="space-y-4 max-w-md text-left">
+            {/* STATIC INSTRUCTIONS & 4-STEP SEQUENCE */}
+            <div className="space-y-5 max-w-lg text-left">
               <div className="space-y-1.5">
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/20 border border-blue-400/40 text-blue-300 text-xs font-bold tracking-wide">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Autonomous Student Printing</span>
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 border border-amber-200/80 text-amber-800 text-xs font-bold tracking-wide">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Autonomous Touchless Printing</span>
                 </div>
-                <h2 className="text-3xl sm:text-4xl font-black tracking-tight text-white leading-tight">
-                  SCAN TO START PRINTING
+                <h2 className="text-3xl sm:text-4xl font-black tracking-tight text-slate-900 leading-tight">
+                  Scan. Upload. Pay. Print.
                 </h2>
-                <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-                  Scan with your phone to upload, edit, pay and print. No app download or touch required.
+                <p className="text-sm text-slate-600 leading-relaxed font-normal">
+                  No app download or kiosk touch required. Upload your document securely from your phone, complete payment, and collect your pages instantly.
                 </p>
               </div>
 
-              {/* Visual Sequence: Upload -> Select Pages -> Pay -> Print */}
-              <div className="space-y-2 text-xs text-slate-200">
-                <div className="flex items-center gap-3 bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
-                  <span className="w-6 h-6 rounded-md bg-blue-600 text-white font-black flex items-center justify-center text-[11px] shrink-0">
+              {/* 4-Step Visual Sequence */}
+              <div className="space-y-2 text-xs text-slate-700">
+                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     1
                   </span>
-                  <span className="font-bold">UPLOAD — Upload document (PDF, JPG, PNG)</span>
+                  <div>
+                    <span className="font-bold text-slate-900">SCAN & UPLOAD</span>
+                    <span className="text-slate-500 block text-[11px]">Scan QR code above with phone & select PDF, JPG or PNG</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
-                  <span className="w-6 h-6 rounded-md bg-blue-600 text-white font-black flex items-center justify-center text-[11px] shrink-0">
+
+                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     2
                   </span>
-                  <span className="font-bold">SELECT PAGES — Choose page ranges, copies & color</span>
+                  <div>
+                    <span className="font-bold text-slate-900">CONFIGURE PAGES</span>
+                    <span className="text-slate-500 block text-[11px]">Select page ranges, number of copies, and color or B&W</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
-                  <span className="w-6 h-6 rounded-md bg-blue-600 text-white font-black flex items-center justify-center text-[11px] shrink-0">
+
+                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     3
                   </span>
-                  <span className="font-bold">PAY — Secure instant payment via Razorpay UPI</span>
+                  <div>
+                    <span className="font-bold text-slate-900">INSTANT UPI PAYMENT</span>
+                    <span className="text-slate-500 block text-[11px]">Pay securely on mobile via Razorpay UPI, GPay or PhonePe</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
-                  <span className="w-6 h-6 rounded-md bg-blue-600 text-white font-black flex items-center justify-center text-[11px] shrink-0">
+
+                <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="w-6 h-6 rounded-md bg-amber-500 text-white font-black flex items-center justify-center text-[11px] shrink-0">
                     4
                   </span>
-                  <span className="font-bold">PRINT — HP Printer outputs document immediately</span>
+                  <div>
+                    <span className="font-bold text-slate-900">COLLECT PRINTOUT</span>
+                    <span className="text-slate-500 block text-[11px]">Laser printer delivers pages; files are instantly destroyed</span>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* STATE: PAYMENT PENDING */}
-        {kioskState === 'PAYMENT_PENDING' && (
-          <div className="bg-slate-900/90 border-2 border-amber-500/80 rounded-3xl p-10 max-w-xl w-full text-center shadow-2xl space-y-5 animate-in fade-in duration-300">
-            <div className="w-20 h-20 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto animate-pulse">
-              <CreditCard className="w-10 h-10" />
+        {/* ============================================================== */}
+        {/* STATE B: DOCUMENT_RECEIVED (PRIVACY-SAFE CONFIRMATION) */}
+        {/* ============================================================== */}
+        {monitorState === 'DOCUMENT_RECEIVED' && (
+          <div className="bg-white border-2 border-amber-500/60 rounded-3xl p-10 max-w-xl w-full text-center shadow-xl space-y-5">
+            <div className="w-20 h-20 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200">
+              <FileCheck2 className="w-10 h-10" />
             </div>
-            <div className="space-y-1">
-              <span className="px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 text-xs font-bold uppercase tracking-widest border border-amber-500/40">
-                PAYMENT PENDING
+            <div className="space-y-1.5">
+              <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-bold uppercase tracking-widest border border-amber-300">
+                DOCUMENT RECEIVED
               </span>
-              <h2 className="text-3xl font-black text-white">Complete payment on your phone</h2>
-              <p className="text-sm text-slate-300">
-                Job ID: <strong className="font-mono text-amber-300">{activeJob?.id}</strong>
+              <h2 className="text-3xl font-black text-slate-900">Document Received Successfully</h2>
+              <p className="text-sm text-slate-600">
+                Reference: <strong className="font-mono text-slate-900 bg-slate-100 px-2 py-0.5 rounded">{activeJob?.masked_id}</strong>
               </p>
             </div>
-            <p className="text-xs text-slate-400">
-              Please finish the UPI payment flow on your mobile screen. The HP printer will begin printing automatically upon verified confirmation.
-            </p>
-          </div>
-        )}
-
-        {/* STATE: PAYMENT VERIFIED & PROCESSING */}
-        {(kioskState === 'PAYMENT_VERIFIED' || kioskState === 'PROCESSING') && (
-          <div className="bg-slate-900/90 border-2 border-blue-500/80 rounded-3xl p-10 max-w-xl w-full text-center shadow-2xl space-y-5 animate-in fade-in duration-300">
-            <div className="w-20 h-20 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center mx-auto animate-spin">
-              <RefreshCw className="w-10 h-10" />
-            </div>
-            <div className="space-y-1">
-              <span className="px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 text-xs font-bold uppercase tracking-widest border border-blue-500/40">
-                PAYMENT VERIFIED ✓
-              </span>
-              <h2 className="text-3xl font-black text-white">Preparing Print Document</h2>
-              <p className="text-sm text-slate-300">
-                Downloading document securely to Raspberry Pi controller...
-              </p>
-            </div>
-            <div className="p-3 bg-slate-800/90 rounded-2xl border border-slate-700 text-xs text-slate-300">
-              CUPS rasterizer active • Zero permanent retention
+            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 text-xs text-slate-600">
+              Validating document structure and billable pages... Please configure print options on your mobile device.
             </div>
           </div>
         )}
 
-        {/* STATE: PRINTING */}
-        {kioskState === 'PRINTING' && (
-          <div className="bg-slate-900/90 border-2 border-emerald-500/80 rounded-3xl p-10 max-w-xl w-full text-center shadow-2xl space-y-5 animate-pulse">
-            <div className="w-20 h-20 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
+        {/* ============================================================== */}
+        {/* STATE C: PROCESSING (AWAITING PAYMENT OR CUPS SPOOLING) */}
+        {/* ============================================================== */}
+        {monitorState === 'PROCESSING' && (
+          <div className="bg-white border-2 border-amber-500/60 rounded-3xl p-10 max-w-xl w-full text-center shadow-xl space-y-5">
+            <div className="w-20 h-20 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200">
+              {activeJob?.status === 'PAYMENT_PENDING' ? (
+                <CreditCard className="w-10 h-10 animate-pulse text-amber-600" />
+              ) : (
+                <RotateCcw className="w-10 h-10 animate-spin text-amber-600" />
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-bold uppercase tracking-widest border border-amber-300">
+                {activeJob?.status === 'PAYMENT_PENDING' ? 'AWAITING PAYMENT' : 'PREPARING PRINT JOB'}
+              </span>
+              <h2 className="text-3xl font-black text-slate-900">
+                {activeJob?.status === 'PAYMENT_PENDING'
+                  ? 'Complete Payment On Mobile'
+                  : 'Preparing Document For Printer'}
+              </h2>
+              <p className="text-sm text-slate-600">
+                Job Reference: <strong className="font-mono text-slate-900 bg-slate-100 px-2 py-0.5 rounded">{activeJob?.masked_id}</strong>
+              </p>
+            </div>
+
+            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 text-xs text-slate-600 space-y-1">
+              <p className="font-semibold text-slate-800">
+                {activeJob?.status === 'PAYMENT_PENDING'
+                  ? 'Please approve the Razorpay UPI transaction on your phone.'
+                  : 'Payment verified. Spooling to local Raspberry Pi CUPS print engine.'}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                Zero-Retention Security: Document resides only in volatile memory during print.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ============================================================== */}
+        {/* STATE D: PRINTING (ACTIVE JOB WITH ACTUAL PRINTER STATUS) */}
+        {/* ============================================================== */}
+        {monitorState === 'PRINTING' && (
+          <div className="bg-white border-2 border-emerald-500/60 rounded-3xl p-10 max-w-xl w-full text-center shadow-xl space-y-5">
+            <div className="w-20 h-20 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto border border-emerald-200">
               <Printer className="w-10 h-10 animate-bounce" />
             </div>
-            <div className="space-y-1">
-              <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-bold uppercase tracking-widest border border-emerald-500/40">
+
+            <div className="space-y-1.5">
+              <span className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold uppercase tracking-widest border border-emerald-300">
                 PRINTING IN PROGRESS
               </span>
-              <h2 className="text-3xl font-black text-white">Printing Document</h2>
-              <p className="text-sm text-slate-300">
-                Job <strong className="font-mono text-sky-300">{activeJob?.id}</strong> • Pages: {activeJob?.pages_total || 1} • Copies: {activeJob?.copies || 1}
+              <h2 className="text-3xl font-black text-slate-900">Printing Your Document</h2>
+              <p className="text-sm text-slate-600">
+                Job Reference: <strong className="font-mono text-slate-900 bg-slate-100 px-2 py-0.5 rounded">{activeJob?.masked_id}</strong>
               </p>
             </div>
-            <div className="p-3.5 bg-slate-800/90 rounded-2xl border border-slate-700 text-xs text-slate-300 flex items-center justify-center gap-2">
-              <Sparkles className="w-4 h-4 text-amber-400" />
-              <span>Please collect your document from the HP printer output tray.</span>
+
+            <div className="grid grid-cols-3 gap-2 py-2 text-xs">
+              <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                <span className="text-slate-400 block text-[10px]">TOTAL PAGES</span>
+                <span className="font-black text-slate-800">{activeJob?.pages_total || 1}</span>
+              </div>
+              <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                <span className="text-slate-400 block text-[10px]">COPIES</span>
+                <span className="font-black text-slate-800">{activeJob?.copies || 1}</span>
+              </div>
+              <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                <span className="text-slate-400 block text-[10px]">OUTPUT</span>
+                <span className="font-black text-slate-800">{activeJob?.is_color ? 'COLOUR' : 'B&W'}</span>
+              </div>
+            </div>
+
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-medium">
+              Please collect your pages from the printer output tray.
             </div>
           </div>
         )}
 
-        {/* STATE: COMPLETED */}
-        {kioskState === 'COMPLETED' && (
-          <div className="bg-slate-900/90 border-2 border-emerald-400/90 rounded-3xl p-10 max-w-xl w-full text-center shadow-2xl space-y-5 animate-in zoom-in-95 duration-300">
-            <div className="w-20 h-20 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/30">
+        {/* ============================================================== */}
+        {/* STATE E: COMPLETED (BRIEF COUNTDOWN, THEN AUTOMATIC RESET TO IDLE) */}
+        {/* ============================================================== */}
+        {monitorState === 'COMPLETED' && (
+          <div className="bg-white border-2 border-emerald-500/60 rounded-3xl p-10 max-w-xl w-full text-center shadow-xl space-y-5">
+            <div className="w-20 h-20 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto border border-emerald-200 shadow-sm">
               <CheckCircle2 className="w-12 h-12" />
             </div>
-            <div className="space-y-1">
-              <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-bold uppercase tracking-widest border border-emerald-500/40">
+
+            <div className="space-y-1.5">
+              <span className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold uppercase tracking-widest border border-emerald-300">
                 PRINT COMPLETED ✓
               </span>
-              <h2 className="text-3xl font-black text-white">Please Collect Your Document</h2>
-              <p className="text-sm text-slate-300">
-                Your print job has been completed by the HP printer.
+              <h2 className="text-3xl font-black text-slate-900">Please Collect Your Document</h2>
+              <p className="text-sm text-slate-600">
+                Job Reference: <strong className="font-mono text-slate-900 bg-slate-100 px-2 py-0.5 rounded">{activeJob?.masked_id}</strong>
               </p>
             </div>
-            <div className="p-3 bg-emerald-950/60 border border-emerald-800/60 rounded-xl text-xs text-emerald-300">
-              Ephemeral Security: Temporary file permanently shredded.
+
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 flex items-center justify-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>Zero-Retention File Privacy: Temporary document permanently shredded.</span>
             </div>
-            <div className="text-[11px] text-slate-400 font-semibold">
-              Returning to READY screen in {completedCountdown}s...
+
+            <div className="text-xs text-slate-400 font-semibold">
+              Returning to IDLE screen in {completedCountdown}s...
             </div>
           </div>
         )}
 
-        {/* STATE: ERROR */}
-        {kioskState === 'ERROR' && (
-          <div className="bg-slate-900/90 border-2 border-red-500/80 rounded-3xl p-10 max-w-xl w-full text-center shadow-2xl space-y-5">
-            <div className="w-20 h-20 rounded-full bg-red-500/20 text-red-400 flex items-center justify-center mx-auto">
+        {/* ============================================================== */}
+        {/* STATE F: ERROR / RECOVERY_REQUIRED */}
+        {/* ============================================================== */}
+        {monitorState === 'RECOVERY_REQUIRED' && (
+          <div className="bg-white border-2 border-amber-500 rounded-3xl p-10 max-w-xl w-full text-center shadow-xl space-y-5">
+            <div className="w-20 h-20 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200">
               <AlertTriangle className="w-10 h-10" />
             </div>
-            <div className="space-y-1">
-              <h2 className="text-3xl font-black text-white">Printing Temporarily Unavailable</h2>
-              <p className="text-sm text-slate-300">
-                The local printer is currently offline or undergoing service.
+
+            <div className="space-y-1.5">
+              <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-bold uppercase tracking-widest border border-amber-300">
+                RECOVERY REQUIRED
+              </span>
+              <h2 className="text-3xl font-black text-slate-900">Print Recovery In Progress</h2>
+              <p className="text-sm text-slate-600">
+                Job Reference: <strong className="font-mono text-slate-900 bg-slate-100 px-2 py-0.5 rounded">{activeJob?.masked_id}</strong>
               </p>
             </div>
-            <div className="inline-flex items-center gap-2 bg-slate-800 px-4 py-2 rounded-xl border border-slate-700 text-xs text-slate-300">
-              <Phone className="w-4 h-4 text-emerald-400" />
-              <span>For Immediate Support: <strong className="text-white">{branding.support_number}</strong></span>
+
+            <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 space-y-1 text-left">
+              <p className="font-bold text-slate-900">
+                Reason: {activeJob?.error_message || data?.sub_message || 'Hardware output uncertain'}
+              </p>
+              <p className="text-slate-500">
+                The system will not reprint blindly. Your transaction is preserved in the audit log.
+              </p>
+            </div>
+
+            <div className="inline-flex items-center gap-2 bg-slate-100 px-4 py-2 rounded-xl border border-slate-200 text-xs text-slate-700">
+              <Phone className="w-4 h-4 text-amber-600" />
+              <span>For Immediate Support: <strong className="text-slate-900">{branding.support_number}</strong></span>
             </div>
           </div>
         )}
 
-        {/* STATE: MAINTENANCE */}
-        {kioskState === 'MAINTENANCE' && (
-          <div className="bg-slate-900/90 border-2 border-amber-500/80 rounded-3xl p-10 max-w-xl w-full text-center shadow-2xl space-y-5">
-            <div className="w-20 h-20 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto animate-pulse">
+        {/* ============================================================== */}
+        {/* STATE G: ERROR (PRINTER OFFLINE OR FATAL DEVICE ERROR) */}
+        {/* ============================================================== */}
+        {monitorState === 'ERROR' && (
+          <div className="bg-white border-2 border-red-400 rounded-3xl p-10 max-w-xl w-full text-center shadow-xl space-y-5">
+            <div className="w-20 h-20 rounded-2xl bg-red-50 text-red-600 flex items-center justify-center mx-auto border border-red-200">
               <AlertTriangle className="w-10 h-10" />
             </div>
-            <div className="space-y-1">
-              <h2 className="text-3xl font-black text-white">SMARTPRINT TEMPORARILY UNAVAILABLE</h2>
-              <p className="text-sm text-slate-300">
-                {branding.maintenance_message}
+
+            <div className="space-y-1.5">
+              <span className="px-3 py-1 rounded-full bg-red-100 text-red-800 text-xs font-bold uppercase tracking-widest border border-red-300">
+                SERVICE TEMPORARILY OFFLINE
+              </span>
+              <h2 className="text-3xl font-black text-slate-900">Printing Temporarily Unavailable</h2>
+              <p className="text-sm text-slate-600">
+                The local printer is currently offline or undergoing paper tray service.
               </p>
             </div>
-            <div className="inline-flex items-center gap-2 bg-slate-800 px-4 py-2 rounded-xl border border-slate-700 text-xs text-slate-300">
-              <Phone className="w-4 h-4 text-emerald-400" />
-              <span>For Assistance: <strong className="text-white">{branding.support_number}</strong></span>
+
+            <div className="inline-flex items-center gap-2 bg-slate-100 px-4 py-2 rounded-xl border border-slate-200 text-xs text-slate-700">
+              <Phone className="w-4 h-4 text-red-600" />
+              <span>For Assistance: <strong className="text-slate-900">{branding.support_number}</strong></span>
+            </div>
+          </div>
+        )}
+
+        {/* ============================================================== */}
+        {/* STATE H: MAINTENANCE */}
+        {/* ============================================================== */}
+        {monitorState === 'MAINTENANCE' && (
+          <div className="bg-white border-2 border-amber-400 rounded-3xl p-10 max-w-xl w-full text-center shadow-xl space-y-5">
+            <div className="w-20 h-20 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200">
+              <AlertTriangle className="w-10 h-10" />
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-bold uppercase tracking-widest border border-amber-300">
+                SCHEDULED MAINTENANCE
+              </span>
+              <h2 className="text-3xl font-black text-slate-900">Kiosk Under Maintenance</h2>
+              <p className="text-sm text-slate-600">
+                This smart printer kiosk is undergoing routine maintenance and will return shortly.
+              </p>
+            </div>
+
+            <div className="inline-flex items-center gap-2 bg-slate-100 px-4 py-2 rounded-xl border border-slate-200 text-xs text-slate-700">
+              <Phone className="w-4 h-4 text-amber-600" />
+              <span>Contact Support: <strong className="text-slate-900">{branding.support_number}</strong></span>
             </div>
           </div>
         )}
       </main>
 
-      {/* 3. HARDWARE STATUS & RATES STRIP (FIXED, NON-SCROLLING) */}
-      <div className="border-t border-slate-700/60 pt-3 shrink-0 space-y-3">
-        {/* Status Indicators */}
+      {/* 3. BOTTOM STRIP: HARDWARE STATUS, PRICING & ZERO-RETENTION FOOTER */}
+      <footer className="border-t border-slate-200 bg-white p-4 rounded-2xl shadow-sm space-y-3 shrink-0">
+        {/* Telemetry and Pricing Strip */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-          <div className="flex items-center justify-center gap-2.5 bg-slate-900/80 border border-slate-700/70 rounded-xl py-2 px-3">
-            <Printer className="w-4 h-4 text-emerald-400" />
-            <span className="font-bold text-slate-300">Printer:</span>
-            <span className="font-black text-emerald-400 flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>{printerStatus === 'READY' ? 'READY' : printerStatus}</span>
+          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
+            <Printer className="w-4 h-4 text-emerald-600" />
+            <span className="font-semibold text-slate-600">Printer:</span>
+            <span className="font-bold text-emerald-700 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+              <span>{printer.status}</span>
             </span>
           </div>
 
-          <div className="flex items-center justify-center gap-2.5 bg-slate-900/80 border border-slate-700/70 rounded-xl py-2 px-3">
-            <Wifi className="w-4 h-4 text-emerald-400" />
-            <span className="font-bold text-slate-300">System:</span>
-            <span className="font-black text-emerald-400 flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-              <span>{systemOnline ? 'ONLINE' : 'OFFLINE'}</span>
+          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
+            <Wifi className="w-4 h-4 text-emerald-600" />
+            <span className="font-semibold text-slate-600">Service:</span>
+            <span className="font-bold text-emerald-700 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+              <span>{networkError ? 'OFFLINE' : 'ONLINE'}</span>
             </span>
           </div>
 
-          <div className="flex items-center justify-center gap-2 bg-slate-900/80 border border-slate-700/70 rounded-xl py-2 px-3">
-            <span className="font-bold text-slate-300">B&W Pages:</span>
-            <span className="font-black text-emerald-400">₹{pricing.bw_price_per_page}/page</span>
+          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
+            <span className="font-semibold text-slate-600">B&W Pages:</span>
+            <span className="font-bold text-slate-900">₹{pricing.bw_price_per_page}/page</span>
           </div>
 
-          <div className="flex items-center justify-center gap-2 bg-slate-900/80 border border-slate-700/70 rounded-xl py-2 px-3">
-            <span className="font-bold text-slate-300">Color Pages:</span>
-            <span className="font-black text-sky-400">₹{pricing.color_price_per_page}/page</span>
+          <div className="flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl py-2 px-3">
+            <span className="font-semibold text-slate-600">Colour Pages:</span>
+            <span className="font-bold text-amber-700">₹{pricing.color_price_per_page}/page</span>
           </div>
         </div>
 
-        {/* Bottom Bar: Privacy Statement + Support + Powered By */}
-        <footer className="flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 gap-2 pt-1 border-t border-slate-800">
-          <div className="flex items-center gap-2 text-slate-300 font-semibold">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-            <span>Zero-Retention File Privacy</span>
+        {/* Privacy + Support + Powered By Details */}
+        <div className="flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-2 pt-1 border-t border-slate-100">
+          <div className="flex items-center gap-2 font-medium text-slate-700">
+            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+            <span>Zero-Retention File Privacy: Ephemeral storage only</span>
           </div>
 
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1.5 text-white font-medium">
-              <Phone className="w-3.5 h-3.5 text-emerald-400" />
-              <span>For Enquiry & Support: <strong className="text-white font-bold">{branding.support_number}</strong></span>
+          <div className="flex items-center gap-5">
+            <div className="flex items-center gap-1.5 text-slate-700">
+              <Phone className="w-3.5 h-3.5 text-amber-600" />
+              <span>
+                Support: <strong className="text-slate-900 font-bold">{branding.support_number}</strong>
+              </span>
             </div>
             <div>
-              Powered by <strong className="text-white">{branding.powered_by}</strong>
+              Powered by <strong className="text-slate-900 font-bold">{branding.powered_by}</strong>
             </div>
           </div>
-        </footer>
-      </div>
+        </div>
+      </footer>
     </div>
   );
 }

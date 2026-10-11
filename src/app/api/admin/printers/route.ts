@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
-import { store } from '@/lib/store';
+import { store, GITAM_ORG_ID } from '@/lib/store';
 import { Printer } from '@/lib/types';
 
-export async function GET() {
-  const printers = store.getPrinters();
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const orgId = searchParams.get('organization_id') || searchParams.get('org_id');
+  const kioskId = searchParams.get('kiosk_id');
+  const printers = store.getPrinters(orgId || undefined, kioskId || undefined);
   return NextResponse.json({ printers });
 }
 
@@ -13,6 +16,7 @@ export async function POST(request: Request) {
     const adminEmail = request.headers.get('x-admin-email') || 'admin@gitam.edu';
 
     const {
+      organization_id,
       kiosk_id,
       printer_name,
       display_name,
@@ -35,8 +39,12 @@ export async function POST(request: Request) {
       );
     }
 
+    const kiosk = store.getKiosk(kiosk_id);
+    const orgId = organization_id || kiosk?.organization_id || GITAM_ORG_ID;
+
     const newPrinter: Printer = {
       id: `printer_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      organization_id: orgId,
       kiosk_id,
       printer_name,
       display_name: display_name || printer_name,
@@ -61,7 +69,7 @@ export async function POST(request: Request) {
       updated_at: new Date().toISOString(),
     };
 
-    store.addPrinter(newPrinter, adminEmail);
+    store.createPrinter(newPrinter, adminEmail);
     return NextResponse.json({ success: true, printer: newPrinter });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });

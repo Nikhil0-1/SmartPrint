@@ -1,58 +1,83 @@
 import crypto from 'crypto';
+import Razorpay from 'razorpay';
+import { store, GITAM_ORG_ID } from './store';
+import { PaymentConfiguration } from './types';
 
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_test_gitam_smartprint';
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || 'secret_gitam_smartprint_2026';
-const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || 'webhook_secret_gitam_smartprint';
+// Cache active Razorpay clients per organization
+const orgClients = new Map<string, Razorpay>();
 
-export function getRazorpayKeyId(): string {
-  return RAZORPAY_KEY_ID;
+export function getOrgRazorpayClient(organizationId: string = GITAM_ORG_ID): {
+  client: Razorpay | null;
+  config: PaymentConfiguration | undefined;
+} {
+  const config = store.getPaymentConfig(organizationId);
+  if (!config || !config.razorpay_key_id || !config.razorpay_key_secret) {
+    return { client: null, config };
+  }
+
+  // If credentials are valid real keys
+  if (
+    config.razorpay_key_id.startsWith('rzp_') &&
+    !config.razorpay_key_id.includes('placeholder')
+  ) {
+    let client = orgClients.get(organizationId);
+    if (!client) {
+      client = new Razorpay({
+        key_id: config.razorpay_key_id,
+        key_secret: config.razorpay_key_secret,
+      });
+      orgClients.set(organizationId, client);
+    }
+    return { client, config };
+  }
+
+  return { client: null, config };
 }
 
-import Razorpay from 'razorpay';
+export function getPublicRazorpayKeyId(organizationId: string = GITAM_ORG_ID): string {
+  const config = store.getPaymentConfig(organizationId);
+  return config?.razorpay_key_id || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_gitam_smartprint';
+}
 
-export const isRazorpayConfigured = (): boolean => {
-  return Boolean(
-    process.env.RAZORPAY_KEY_ID &&
-    process.env.RAZORPAY_KEY_SECRET &&
-    !process.env.RAZORPAY_KEY_ID.includes('rzp_test_gitam')
-  );
-};
+export async function createMultiTenantRazorpayOrder(
+  organizationId: string,
+  amountPaise: number,
+  receiptId: string,
+  notes: Record<string, string> = {}
+) {
+  const { client, config } = getOrgRazorpayClient(organizationId);
 
-export const razorpayClient = process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET
-  ? new Razorpay({
-      key_id: RAZORPAY_KEY_ID,
-      key_secret: RAZORPAY_KEY_SECRET,
-    })
-  : null;
-
-export async function createRazorpayOrder(amountRupees: number, receiptId: string) {
-  const amountPaise = Math.round(amountRupees * 100);
-
-  if (razorpayClient && isRazorpayConfigured()) {
+  // If real configured provider client exists
+  if (client && config && config.status === 'CONFIGURED') {
     try {
-      const order = await razorpayClient.orders.create({
+      const order = await client.orders.create({
         amount: amountPaise,
         currency: 'INR',
         receipt: receiptId,
         notes: {
-          system: 'GITAM SMARTPRINT',
+          ...notes,
+          organization_id: organizationId,
           receipt: receiptId,
         },
       });
-      return order;
+      return {
+        id: order.id,
+        entity: 'order',
+        amount: order.amount,
+        amount_paid: 0,
+        amount_due: order.amount,
+        currency: 'INR',
+        receipt: receiptId,
+        status: order.status,
+        created_at: typeof order.created_at === 'number' ? order.created_at : Math.floor(Date.now() / 1000),
+      };
     } catch (err) {
-      console.error('Real Razorpay order creation failed, falling back to test order:', err);
+      console.error(`[RAZORPAY ERROR] Real order creation failed for org ${organizationId}:`, err);
     }
   }
 
-  return createRazorpayOrderMock(amountRupees, receiptId);
-}
-
-export function createRazorpayOrderMock(amountRupees: number, receiptId: string) {
-  // Amount in paise
-  const amountPaise = Math.round(amountRupees * 100);
+  // Provider test mode fallback for local campus testing when real credentials are not yet entered
   const orderId = `order_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
-
   return {
     id: orderId,
     entity: 'order',
@@ -62,7 +87,6 @@ export function createRazorpayOrderMock(amountRupees: number, receiptId: string)
     currency: 'INR',
     receipt: receiptId,
     status: 'created',
-    attempts: 0,
     created_at: Math.floor(Date.now() / 1000),
   };
 }
@@ -70,24 +94,37 @@ export function createRazorpayOrderMock(amountRupees: number, receiptId: string)
 export function verifyPaymentSignature(
   orderId: string,
   paymentId: string,
-  signature: string
+  signature: string,
+  organizationId: string = GITAM_ORG_ID
 ): boolean {
+  const config = store.getPaymentConfig(organizationId);
+  const secret = config?.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET || 'secret_gitam_smartprint_2026';
+
+  // Test mode signature check
   if (process.env.NODE_ENV !== 'production' && signature.startsWith('mock_sig_')) {
     return true;
   }
 
   const generatedSignature = crypto
-    .createHmac('sha256', RAZORPAY_KEY_SECRET)
+    .createHmac('sha256', secret)
     .update(`${orderId}|${paymentId}`)
     .digest('hex');
 
   return generatedSignature === signature;
 }
 
-export function verifyWebhookSignature(rawBody: string, signatureHeader: string): boolean {
+export function verifyWebhookSignature(
+  rawBody: string,
+  signatureHeader: string,
+  organizationId: string = GITAM_ORG_ID
+): boolean {
   if (!signatureHeader) return false;
+
+  const config = store.getPaymentConfig(organizationId);
+  const secret = config?.webhook_secret || process.env.RAZORPAY_WEBHOOK_SECRET || 'webhook_secret_gitam_smartprint';
+
   const expectedSignature = crypto
-    .createHmac('sha256', RAZORPAY_WEBHOOK_SECRET)
+    .createHmac('sha256', secret)
     .update(rawBody)
     .digest('hex');
 

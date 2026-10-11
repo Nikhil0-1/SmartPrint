@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     store.updateJobStatus(job_id, 'COMPLETED', { cups_job_id });
 
     // 2. CRITICAL DOCUMENT SECURITY: PERMANENTLY DELETE CLOUD & MEMORY FILE
-    const deleted = permanentlyDeleteDocument(job_id);
+    const deleted = await permanentlyDeleteDocument(job_id);
 
     // 3. Log verified completion
     store.logSystem('INFO', 'CLEANUP', `COMPLETE_CYCLE: Job ${job_id} successfully printed and verified deleted.`, {

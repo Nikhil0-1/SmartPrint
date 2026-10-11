@@ -1,0 +1,16 @@
+[Unit]
+Description=GITAM SMARTPRINT Cleanup Temporary Print Files Service
+Documentation=https://github.com/Nikhil0-1/SmartPrint/blob/main/docs/RASPBERRY_PI_SETUP.md
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash /opt/smartprint/raspberry-pi/scripts/cleanup.sh
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=no
+
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=false

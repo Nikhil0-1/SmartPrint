@@ -11,8 +11,8 @@ export default function KioskDefaultRedirect() {
   }, [router]);
 
   return (
-    <div className="h-screen w-screen bg-[#0d253f] text-white flex items-center justify-center font-sans">
-      <span className="text-sm font-bold tracking-wider">Loading GITAM SMARTPRINT Kiosk Screen...</span>
+    <div className="h-screen w-screen bg-[#fafbfc] text-slate-800 flex items-center justify-center font-sans">
+      <span className="text-sm font-bold tracking-wider text-amber-700">Loading GITAM SMARTPRINT Kiosk Screen...</span>
     </div>
   );
 }

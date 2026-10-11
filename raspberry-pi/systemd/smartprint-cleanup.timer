@@ -1,0 +1,11 @@
+[Unit]
+Description=GITAM SMARTPRINT Cleanup Timer (every hour + on boot)
+Documentation=https://github.com/Nikhil0-1/SmartPrint/blob/main/docs/RASPBERRY_PI_SETUP.md
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+Unit=smartprint-cleanup.service
+
+[Install]
+WantedBy=timers.target

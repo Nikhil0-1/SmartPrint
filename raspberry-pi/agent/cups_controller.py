@@ -33,6 +33,7 @@ class CupsController:
         else:
             self.conn = None
 
+    @staticmethod
     def detect_usb_printers():
         """Discovers USB printers connected to Raspberry Pi via lsusb and CUPS lpinfo."""
         printers = []

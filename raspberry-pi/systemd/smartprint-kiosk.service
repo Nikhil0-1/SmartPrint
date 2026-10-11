@@ -1,16 +1,27 @@
 [Unit]
-Description=GITAM SMARTPRINT Fullscreen HDMI Chromium Kiosk
-After=network-online.target smartprint-agent.service
+Description=GITAM SMARTPRINT Fullscreen HDMI Chromium Kiosk Display
+# Wait for the graphical session to be available AND the network AND the agent
+After=graphical-session.target network-online.target smartprint-agent.service
+PartOf=graphical-session.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# Run as the desktop user (pi or your actual username — change if different)
 User=pi
+Group=pi
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/pi/.Xauthority
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+# Pass the real deployed URL — update SMARTPRINT_BACKEND_URL to your cloud URL
+Environment=KIOSK_URL=http://localhost:3000/kiosk/GITAM-SPK-001
+ExecStartPre=/bin/sleep 5
 ExecStart=/bin/bash /opt/smartprint/raspberry-pi/scripts/kiosk_setup.sh
 Restart=always
-RestartSec=5
+RestartSec=8
+# Kill chromium on service stop
+KillMode=process
+KillSignal=SIGTERM
 
 [Install]
-WantedBy=graphical.target
+WantedBy=graphical-session.target

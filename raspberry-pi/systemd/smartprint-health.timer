@@ -1,0 +1,11 @@
+[Unit]
+Description=GITAM SMARTPRINT Health Check Timer (every 5 minutes)
+Documentation=https://github.com/Nikhil0-1/SmartPrint/blob/main/docs/RASPBERRY_PI_SETUP.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=smartprint-health.service
+
+[Install]
+WantedBy=timers.target

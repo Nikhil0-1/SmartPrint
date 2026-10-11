@@ -12,7 +12,7 @@ export async function POST(request: Request) {
 
     const printer = printer_id
       ? store.getPrinter(printer_id)
-      : store.getPrinterByKiosk(kiosk_id);
+      : store.getPrinters(undefined, kiosk_id)[0];
 
     if (!printer) {
       return NextResponse.json({ error: 'Target printer not found' }, { status: 404 });

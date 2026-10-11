@@ -34,7 +34,7 @@ CONFIG_FILE = os.getenv("SMARTPRINT_CONFIG", "/etc/smartprint/agent_config.json"
 LOCAL_STATE_DB = "/var/lib/smartprint/agent_state.db"
 TEMP_JOBS_DIR = "/var/lib/smartprint/jobs"
 
-DEFAULT_BACKEND_URL = os.getenv("SMARTPRINT_BACKEND_URL", "http://localhost:3000")
+DEFAULT_BACKEND_URL = os.getenv("SMARTPRINT_BACKEND_URL", "http://localhost:3001")
 DEFAULT_KIOSK_ID = os.getenv("SMARTPRINT_KIOSK_ID", "GITAM-SPK-001")
 DEFAULT_DEVICE_TOKEN = os.getenv("SMARTPRINT_DEVICE_TOKEN", "gitam_spk_001_secure_device_secret_2026")
 
@@ -207,6 +207,7 @@ class SmartPrintAgent:
         url = f"{self.config['backend_url']}{endpoint}"
         headers = {
             "Content-Type": "application/json",
+            "X-Organization-Id": self.config.get("organization_id", ""),
             "X-Kiosk-Id": self.config["kiosk_id"],
             "X-Device-Token": self.config["device_token"],
             "User-Agent": f"GITAM-SmartPrint-Agent/1.0 ({self.config['kiosk_id']})"
@@ -281,7 +282,7 @@ class SmartPrintAgent:
         """Full end-to-end print lifecycle on Raspberry Pi."""
         job_id = job["id"]
         idempotency_key = job["idempotency_key"]
-        download_url = job.get("signed_download_url")
+        download_url = job.get("signed_download_url") or f"{self.config['backend_url']}/api/kiosk/download/{job_id}?token={idempotency_key}"
 
         logging.info(f"========== START PRINT JOB {job_id} ==========")
         self.make_api_request("/api/kiosk/update-status", {"job_id": job_id, "status": "DOWNLOADING"})

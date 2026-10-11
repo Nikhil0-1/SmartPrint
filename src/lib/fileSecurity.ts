@@ -1,17 +1,14 @@
 import { PDFDocument } from 'pdf-lib';
 import { store } from './store';
+import { storageService, TemporaryUploadResult } from './storage';
 
-// Allowed MIME types
+// Allowed MIME types strictly adhering to Section 8.1
 const ALLOWED_MIME_TYPES = new Set([
   'application/pdf',
   'image/jpeg',
   'image/png',
   'image/jpg',
 ]);
-
-// Temporary in-memory document buffer map (job_id -> Buffer)
-// This guarantees local testing and downloads work seamlessly before or alongside Supabase bucket configuration!
-const temporaryDocStore = new Map<string, { buffer: Buffer; mimeType: string; originalName: string }>();
 
 export interface FileValidationResult {
   valid: boolean;
@@ -36,16 +33,23 @@ export async function validateAndExtractPages(
   }
 
   // 2. MIME type check
-  if (!ALLOWED_MIME_TYPES.has(mimeType)) {
+  const lowerName = fileName.toLowerCase();
+  const isAllowedExt =
+    lowerName.endsWith('.pdf') ||
+    lowerName.endsWith('.jpg') ||
+    lowerName.endsWith('.jpeg') ||
+    lowerName.endsWith('.png');
+
+  if (!ALLOWED_MIME_TYPES.has(mimeType) && !isAllowedExt) {
     return {
       valid: false,
       error: 'Unsupported file format. Please upload a PDF, PNG, or JPEG file.',
     };
   }
 
-  // 3. Extract page count
+  // 3. Extract actual page count
   let pageCount = 1;
-  if (mimeType === 'application/pdf' || fileName.toLowerCase().endsWith('.pdf')) {
+  if (mimeType === 'application/pdf' || lowerName.endsWith('.pdf')) {
     try {
       const pdfDoc = await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
       pageCount = pdfDoc.getPageCount();
@@ -59,89 +63,90 @@ export async function validateAndExtractPages(
       };
     }
   } else {
-    // Images default to 1 page
+    // Images are strictly 1 page
     pageCount = 1;
   }
 
   return {
     valid: true,
     pageCount,
-    mimeType,
+    mimeType: mimeType || (lowerName.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'),
   };
 }
 
-import { supabaseAdmin, BUCKET_NAME, isSupabaseConfigured } from './supabase';
+export async function saveTemporaryDocumentMultiTenant(
+  organizationId: string,
+  sessionId: string,
+  jobId: string,
+  buffer: Buffer,
+  mimeType: string,
+  originalName: string
+): Promise<TemporaryUploadResult> {
+  const result = await storageService.uploadTemporaryDocument({
+    organizationId,
+    sessionId,
+    documentId: jobId,
+    filename: originalName,
+    mimeType,
+    buffer,
+  });
+
+  store.logSystem(
+    'INFO',
+    'STORAGE',
+    `Secure temporary document stored [Provider: ${result.storageProvider}] for job ${jobId}`,
+    { organizationId, objectKey: result.objectKey, sizeBytes: result.sizeBytes }
+  );
+
+  return result;
+}
 
 export async function saveTemporaryDocument(
   jobId: string,
   buffer: Buffer,
   mimeType: string,
   originalName: string
-) {
-  // Always store in memory for immediate agent access
-  temporaryDocStore.set(jobId, { buffer, mimeType, originalName });
-
-  // If Supabase is configured, upload to private print-temp storage bucket
-  if (isSupabaseConfigured()) {
-    try {
-      const filePath = `${jobId}/${originalName}`;
-      const { error } = await supabaseAdmin.storage
-        .from(BUCKET_NAME)
-        .upload(filePath, buffer, {
-          contentType: mimeType,
-          upsert: true,
-        });
-
-      if (error) {
-        store.logSystem('WARNING', 'CLEANUP', `Supabase bucket upload failed: ${error.message}`);
-      } else {
-        store.logSystem('INFO', 'CLEANUP', `Uploaded document to private bucket ${BUCKET_NAME}/${filePath}`);
-      }
-    } catch (err) {
-      store.logSystem('WARNING', 'CLEANUP', `Supabase upload error: ${(err as Error).message}`);
-    }
-  }
+): Promise<TemporaryUploadResult> {
+  const job = store.getJob(jobId);
+  const organizationId = job?.organization_id || '00000000-0000-0000-0000-000000000001';
+  const sessionId = job?.session_id || 'sess_default';
+  return saveTemporaryDocumentMultiTenant(organizationId, sessionId, jobId, buffer, mimeType, originalName);
 }
 
-export function getTemporaryDocument(jobId: string) {
-  return temporaryDocStore.get(jobId);
+export async function getTemporaryDocument(jobId: string): Promise<Buffer | null> {
+  const job = store.getJob(jobId);
+  const objectKey = job?.storage_object_key;
+  if (objectKey) {
+    return storageService.getTemporaryDocument(objectKey);
+  }
+  // Try fallback key pattern
+  const orgId = job?.organization_id || '00000000-0000-0000-0000-000000000001';
+  const sessId = job?.session_id || 'sess_default';
+  const fallbackKey = `${orgId}/${sessId}/${jobId}_${job?.original_filename || 'document.pdf'}`;
+  return storageService.getTemporaryDocument(fallbackKey);
 }
 
 export async function permanentlyDeleteDocument(jobId: string): Promise<boolean> {
-  // 1. Wipe in-memory buffer
-  const exists = temporaryDocStore.has(jobId);
-  if (exists) {
-    const item = temporaryDocStore.get(jobId);
-    if (item?.buffer) {
-      // Overwrite buffer memory with zeros before deletion
-      item.buffer.fill(0);
-    }
-    temporaryDocStore.delete(jobId);
+  const job = store.getJob(jobId);
+  let success = false;
+
+  if (job?.storage_object_key) {
+    success = await storageService.deleteTemporaryDocument(job.storage_object_key);
+  } else {
+    // Check fallback keys
+    const orgId = job?.organization_id || '00000000-0000-0000-0000-000000000001';
+    const sessId = job?.session_id || 'sess_default';
+    const fallbackKey = `${orgId}/${sessId}/${jobId}_${job?.original_filename || 'document.pdf'}`;
+    success = await storageService.deleteTemporaryDocument(fallbackKey);
   }
 
-  // 2. Wipe from Supabase storage if active
-  if (isSupabaseConfigured()) {
-    try {
-      const jobFile = store.getAllJobs().find((j) => j.id === jobId);
-      if (jobFile?.original_filename) {
-        const filePath = `${jobId}/${jobFile.original_filename}`;
-        await supabaseAdmin.storage.from(BUCKET_NAME).remove([filePath]);
-      }
-    } catch (e) {
-      store.logSystem('WARNING', 'CLEANUP', `Failed removing from Supabase bucket: ${(e as Error).message}`);
-    }
-  }
-
-  // 3. Mark database metadata deleted and erase storage path
+  // Mark in store metadata that file has been permanently purged
   store.deleteJobFile(jobId);
 
-  // 4. Verify deletion
-  const verify = temporaryDocStore.has(jobId);
-  if (!verify) {
-    store.logSystem('INFO', 'CLEANUP', `CLEANUP_VERIFIED: Document permanently destroyed for job ${jobId}`);
-    return true;
-  } else {
-    store.logSystem('CRITICAL', 'CLEANUP', `CLEANUP_FAILED: Failed to purge memory buffer for job ${jobId}`);
-    return false;
-  }
+  store.logSystem('INFO', 'CLEANUP', `CLEANUP_VERIFIED: Ephemeral document permanently purged for job ${jobId}`, {
+    job_id: jobId,
+    purged: success,
+  });
+
+  return success;
 }

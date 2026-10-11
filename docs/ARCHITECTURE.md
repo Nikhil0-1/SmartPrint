@@ -1,95 +1,80 @@
-# GITAM SMARTPRINT - TECHNICAL ARCHITECTURE
+# GITAM SMARTPRINT — Complete System Architecture
 
-## 1. System Topology
+## 1. System Topology & Multi-Tenant Hierarchy
 
-GITAM SMARTPRINT is partitioned into four major layers:
+GITAM SMARTPRINT is an autonomous, multi-tenant, zero-retention cloud & IoT printing platform designed for campus and organizational deployments.
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│                   1. CLIENT LAYER                              │
-│  - Customer Mobile Web App (Responsive / Touch-optimized)      │
-│  - Raspberry Pi HDMI Kiosk Screen (1080p Chromium Kiosk)       │
-│  - Admin Web Console (Multi-tenant Campus Operations)          │
-└────────────────┬───────────────────────────────▲───────────────┘
-                 │ HTTPS                         │ HTTPS / Realtime
-                 ▼                               │
-┌────────────────────────────────────────────────┴───────────────┐
-│                   2. CLOUD BACKEND LAYER                       │
-│  - Next.js 16 App Router Server Actions & REST APIs            │
-│  - Dynamic Session Generator & QR Token Dispatcher             │
-│  - Server-side PDF Page Analyzer & Pricing Engine              │
-│  - Ephemeral Memory / Private Storage Gateway                  │
-│  - Razorpay Order & Webhook Signature Verifier (HMAC-SHA256)   │
-│  - Idempotency & Single-Print Job State Machine                │
-└────────────────┬───────────────────────────────────────────────┘
-                 │ Secure Outbound Polling / HTTPS
-                 ▼
-┌────────────────────────────────────────────────────────────────┐
-│                   3. LOCAL CONTROLLER LAYER                    │
-│  - Raspberry Pi 3B+ (ARMv7 Linux / systemd daemons)            │
-│  - SmartPrint Python Agent (`smartprint_agent.py`)             │
-│  - Outbound-only TLS client (No incoming router ports needed)   │
-│  - Local Idempotency State Store (`agent_state.db`)            │
-│  - Secure local workspace (`/var/lib/smartprint/jobs/<id>`)   │
-│  - CUPS Controller & IPP Job Poller (`cups_controller.py`)     │
-│  - Secure File Overwriting & Wiping Engine (`shred -u`)        │
-└────────────────┬───────────────────────────────────────────────┘
-                 │ High-Speed USB 2.0 Cable
-                 ▼
-┌────────────────────────────────────────────────────────────────┐
-│                   4. HARDWARE PRINTER LAYER                    │
-│  - HP LaserJet Professional Series Printer                      │
-│  - Direct USB connection (No Wi-Fi dependencies)              │
-│  - CUPS Queue: `HP_LaserJet_USB`                               │
-│  - A4 Plain Paper Output Tray                                  │
-└────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph MultiTenantHierarchy["Multi-Tenant Hierarchy"]
+        SA[Platform Super Admin] --> Org1[Organization 1: GITAM SMARTPRINT]
+        SA --> Org2[Organization 2: APNA SMART PRINTER]
+        Org1 --> OA1[Organization Admin]
+        Org1 --> Loc1[Location: Central Library]
+        Loc1 --> Kiosk1[Kiosk: GITAM-SPK-001]
+        Kiosk1 --> RPi1[Raspberry Pi 3B+ Controller]
+        RPi1 --> Mon1[HDMI Kiosk Monitor - Light Mode]
+        RPi1 --> Prn1[CUPS Queue: HP LaserJet USB]
+        Prn1 --> Job1[Print Jobs]
+    end
 ```
 
-## 2. Job State Machine & Transitions
+---
 
-Every print request follows an immutable, strictly ordered lifecycle:
+## 2. Component Architecture
 
+```mermaid
+graph LR
+    subgraph Clients["Edge & Mobile Clients"]
+        Mobile["Customer Mobile Web<br/>/print/gitam/gitam-spk-001"]
+        KioskMon["HDMI Kiosk Monitor<br/>/kiosk/GITAM-SPK-001"]
+        AdminUI["Admin Web Console<br/>/admin"]
+    end
+
+    subgraph CloudBackend["Next.js 16 + Supabase Backend"]
+        API["REST & Server Actions<br/>Next.js 16 App Router"]
+        Store["State Engine &<br/>Concurrency Manager"]
+        DB[("Supabase PostgreSQL<br/>Multi-Tenant DB")]
+        Storage[("Supabase Storage<br/>smartprint-temporary")]
+        Realtime["Supabase Realtime<br/>Postgres Replication"]
+    end
+
+    subgraph PaymentGateway["Payment Processing"]
+        RZP["Razorpay Gateway<br/>Per-Organization Credentials"]
+    end
+
+    subgraph IoTEdge["Raspberry Pi 3B+ Edge Controller"]
+        Agent["smartprint_agent.py<br/>Outbound TLS Poller"]
+        StateDB[("SQLite<br/>agent_state.db")]
+        CUPS["Linux CUPS 2.4<br/>cups_controller.py"]
+        Printer["HP LaserJet USB<br/>Physical Output"]
+    end
+
+    Mobile -->|1. Upload File & Options| API
+    Mobile -->|2. UPI Checkout| RZP
+    RZP -->|3. Signed Webhook| API
+    API --> Store
+    Store --> DB
+    Store --> Realtime
+    Realtime -.->|Live Notifications| KioskMon
+    KioskMon -->|Authoritative Status Fetch| API
+    Agent -->|Outbound Polling & Job Fetch| API
+    Agent --> Storage
+    Agent --> StateDB
+    Agent --> CUPS
+    CUPS --> Printer
 ```
-[CREATED]
-    │  Customer selects kiosk
-    ▼
-[UPLOAD_COMPLETE]
-    │  Server validates MIME/size & extracts PDF page count via pdf-lib
-    ▼
-[PAYMENT_PENDING]
-    │  Razorpay order created with server-verified amount
-    ▼
-[PAYMENT_VERIFIED]
-    │  HMAC SHA256 signature verified; exactly 1 print job authorized
-    ▼
-[QUEUED]
-    │  Assigned to kiosk queue
-    ▼
-[DOWNLOADING]
-    │  Pi Agent fetches document via short-lived signed URL
-    ▼
-[PROCESSING]
-    │  Document validated locally on Pi (/var/lib/smartprint/jobs/<id>)
-    ▼
-[SUBMITTED_TO_CUPS]
-    │  Passed to CUPS daemon via pycups / lp CLI
-    ▼
-[PRINTING]
-    │  Printer actively marks paper
-    ▼
-[PRINTED]
-    │  CUPS reports IPP_JOB_COMPLETED
-    ▼
-[CLEANUP_PENDING]
-    │  Local shredding (/var/lib/smartprint/jobs/<id>) & Cloud memory purge
-    ▼
-[COMPLETED]
-    │  Document access references nullified; audit log recorded
-    ▼
-[READY] (Kiosk displays refreshed QR code)
-```
 
-## 3. Network & Security Guarantees
-- **Zero Inbound Ports on Pi**: Raspberry Pi makes strictly outbound HTTPS requests to the cloud backend. No port forwarding or public IP is required.
-- **Idempotency Guard**: Every transaction has an `idempotency_key`. The Pi Agent records processed keys in a local SQLite database and refuses to re-print duplicate orders even during network retries or power interruptions.
-- **Ephemeral Storage**: Customer documents are treated as temporary volatile memory. Normal successful prints trigger immediate multi-layer wiping (`shred -u` on disk, memory buffer destruction, storage path nullification).
+---
+
+## 3. Technology Stack & Fixed Architectural Decisions
+
+- **Frontend Application**: React 19 / Next.js 16 (App Router), Vanilla CSS & TailwindCSS with Light/White + Amber Accent palette.
+- **Authentication**: Firebase Authentication with server-side token validation and database role authorization.
+- **Database**: Supabase PostgreSQL with multi-tenant row-level security and atomic reservation functions.
+- **File Storage**: Private Supabase Storage bucket (`smartprint-temporary`) via provider-independent `IStorageService` abstraction.
+- **Live Updates**: Supabase Realtime for instant event push + fallback authoritative HTTP polling.
+- **Payments**: Razorpay configured per organization with integer paise precision and raw webhook signature verification.
+- **Controller Hardware**: Raspberry Pi 3B+ (ARMv7 / aarch64) running Raspberry Pi OS Lite.
+- **Monitor Display**: Dedicated HDMI monitor in fullscreen Chromium/Cage kiosk mode running strict state machine.
+- **Print Engine**: Linux CUPS (Common Unix Printing System) with native IPP/raster drivers.

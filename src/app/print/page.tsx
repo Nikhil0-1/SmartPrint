@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, Suspense, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   UploadCloud,
@@ -9,26 +9,31 @@ import {
   CreditCard,
   CheckCircle2,
   AlertCircle,
-  Copy,
-  Layers,
   ArrowRight,
   ShieldCheck,
   RefreshCw,
   Phone,
   Sparkles,
-  HelpCircle,
 } from 'lucide-react';
 import { Footer } from '@/components/Footer';
 import { DEFAULT_BRANDING, DEFAULT_PRICING } from '@/lib/constants';
 
-function PrintAppContent() {
+interface PrintAppContentProps {
+  orgSlug?: string;
+  kioskSlug?: string;
+}
+
+function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug }: PrintAppContentProps) {
   const searchParams = useSearchParams();
-  const kioskId = searchParams.get('kiosk_id') || 'GITAM-SPK-001';
-  const sessionId = searchParams.get('session_id') || '';
+  const orgSlug = initialOrgSlug || searchParams.get('org') || searchParams.get('organization') || 'gitam';
+  const kioskParam = initialKioskSlug || searchParams.get('kiosk_id') || searchParams.get('kiosk') || 'GITAM-SPK-001';
+  const sessionToken = searchParams.get('session_token') || searchParams.get('session_id') || '';
 
   // Config State
   const [branding, setBranding] = useState(DEFAULT_BRANDING);
   const [pricing, setPricing] = useState(DEFAULT_PRICING);
+  const [kioskId, setKioskId] = useState<string>(kioskParam);
+  const [organizationId, setOrganizationId] = useState<string>('');
 
   // Workflow Steps: 'UPLOAD' | 'CONFIG' | 'PAYING' | 'PRINTING' | 'SUCCESS' | 'ERROR'
   const [step, setStep] = useState<'UPLOAD' | 'CONFIG' | 'PAYING' | 'PRINTING' | 'SUCCESS' | 'ERROR'>('UPLOAD');
@@ -50,26 +55,47 @@ function PrintAppContent() {
 
   // Calculated Pricing
   const [calculatedAmount, setCalculatedAmount] = useState<number>(1.0);
-  const [priceBreakdown, setPriceBreakdown] = useState<any>(null);
-  const [isCalculating, setIsCalculating] = useState<boolean>(false);
 
   // Payment & Live Printing
   const [paymentOrderId, setPaymentOrderId] = useState<string>('');
+  const [razorpayKeyId, setRazorpayKeyId] = useState<string>('');
   const [printStatusText, setPrintStatusText] = useState<string>('Verifying payment authorization...');
   const [cupsJobId, setCupsJobId] = useState<number | null>(null);
 
-  // Fetch initial branding & pricing
+  // If a session token was passed, resolve it
   useEffect(() => {
-    fetch('/api/branding')
+    if (sessionToken) {
+      fetch(`/api/kiosk/session?token=${encodeURIComponent(sessionToken)}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.session) {
+            setKioskId(data.session.kiosk_id);
+            if (data.session.organization_id) {
+              setOrganizationId(data.session.organization_id);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [sessionToken]);
+
+  // Fetch Organization Branding & Pricing dynamically
+  useEffect(() => {
+    fetch(`/api/branding?slug=${encodeURIComponent(orgSlug)}`)
       .then((res) => res.json())
-      .then((data) => data.branding && setBranding(data.branding))
+      .then((data) => {
+        if (data.branding) setBranding(data.branding);
+        if (data.organization?.id) setOrganizationId(data.organization.id);
+      })
       .catch(() => {});
 
-    fetch('/api/pricing')
+    fetch(`/api/pricing?slug=${encodeURIComponent(orgSlug)}`)
       .then((res) => res.json())
-      .then((data) => data.pricing && setPricing(data.pricing))
+      .then((data) => {
+        if (data.pricing) setPricing(data.pricing);
+      })
       .catch(() => {});
-  }, []);
+  }, [orgSlug]);
 
   // Handle File Upload
   const handleFileUpload = async (selectedFile: File) => {
@@ -80,7 +106,8 @@ function PrintAppContent() {
       const formData = new FormData();
       formData.append('file', selectedFile);
       formData.append('kiosk_id', kioskId);
-      if (sessionId) formData.append('session_id', sessionId);
+      if (organizationId) formData.append('organization_id', organizationId);
+      if (sessionToken) formData.append('session_id', sessionToken);
 
       const res = await fetch('/api/customer/upload', {
         method: 'POST',
@@ -96,6 +123,7 @@ function PrintAppContent() {
       setJobId(data.job.id);
       setTotalPages(data.job.pages_total);
       setCalculatedAmount(data.job.calculated_amount);
+      if (data.job.organization_id) setOrganizationId(data.job.organization_id);
       setStep('CONFIG');
     } catch (err) {
       setUploadError((err as Error).message);
@@ -105,34 +133,36 @@ function PrintAppContent() {
   };
 
   // Recalculate Price on options change
-  useEffect(() => {
+  const recalculatePrice = useCallback(async () => {
     if (!jobId || step !== 'CONFIG') return;
-
-    setIsCalculating(true);
     const pagesSelected = pagesMode === 'ALL' ? 'All' : customPageRange || '1';
 
-    fetch('/api/customer/calculate-price', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        job_id: jobId,
-        pages_selected: pagesSelected,
-        copies,
-        is_color: isColor,
-        is_duplex: isDuplex,
-        orientation,
-      }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.success) {
-          setCalculatedAmount(data.amount);
-          setPriceBreakdown(data.breakdown);
-        }
-      })
-      .catch(() => {})
-      .finally(() => setIsCalculating(false));
-  }, [jobId, copies, pagesMode, customPageRange, isColor, isDuplex, orientation, step]);
+    try {
+      const res = await fetch('/api/customer/calculate-price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: jobId,
+          organization_id: organizationId,
+          pages_selected: pagesSelected,
+          copies,
+          is_color: isColor,
+          is_duplex: isDuplex,
+          orientation,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCalculatedAmount(data.amount);
+      }
+    } catch {
+      // ignore
+    }
+  }, [jobId, organizationId, copies, pagesMode, customPageRange, isColor, isDuplex, orientation, step]);
+
+  useEffect(() => {
+    recalculatePrice();
+  }, [recalculatePrice]);
 
   // Initiate Payment
   const handleProceedToPayment = async () => {
@@ -148,6 +178,7 @@ function PrintAppContent() {
       if (!res.ok) throw new Error(data.error || 'Failed to create payment order');
 
       setPaymentOrderId(data.order_id);
+      setRazorpayKeyId(data.key_id);
     } catch (err) {
       setUploadError((err as Error).message);
       setStep('CONFIG');
@@ -178,10 +209,10 @@ function PrintAppContent() {
       if (!verifyRes.ok) throw new Error(verifyData.error || 'Payment verification failed');
 
       // 2. Poll / Trigger Pi Agent Execution
-      setPrintStatusText('Payment verified! Connecting to Kiosk Raspberry Pi 3B+ controller...');
+      setPrintStatusText('Payment verified! Connecting to Raspberry Pi 3B+ agent...');
       await new Promise((r) => setTimeout(r, 1000));
 
-      setPrintStatusText('Pi Agent downloaded temporary document. Generating CUPS queue command...');
+      setPrintStatusText('Pi Agent spooled document. Submitting to CUPS queue...');
       await new Promise((r) => setTimeout(r, 1200));
 
       // Trigger simulation / status transition
@@ -200,10 +231,10 @@ function PrintAppContent() {
         setCupsJobId(simData.cups_job_id);
       }
 
-      setPrintStatusText('HP LaserJet USB printer actively outputting pages...');
+      setPrintStatusText('Printer actively outputting pages...');
       await new Promise((r) => setTimeout(r, 1500));
 
-      setPrintStatusText('CUPS verified physical completion. Permanently purging temporary customer file...');
+      setPrintStatusText('CUPS verified print output. Permanently destroying temporary file...');
       await new Promise((r) => setTimeout(r, 1000));
 
       setStep('SUCCESS');
@@ -307,10 +338,10 @@ function PrintAppContent() {
             <div className="bg-blue-50/70 border border-blue-100 rounded-xl p-3.5 space-y-2 text-xs text-slate-700">
               <div className="flex items-center gap-2 text-blue-900 font-bold text-[11px]">
                 <ShieldCheck className="w-4 h-4 text-blue-600" />
-                <span>End-to-End Privacy Guarantee</span>
+                <span>Zero-Retention File Privacy</span>
               </div>
               <p className="text-[11px] text-slate-600 leading-relaxed">
-                Files are stored in private temporary memory only and permanently wiped from the Raspberry Pi & Cloud immediately upon successful print.
+                Your file is stored in private temporary memory only and permanently erased from the Raspberry Pi and Supabase Storage immediately upon print completion.
               </p>
             </div>
           </div>
@@ -450,7 +481,7 @@ function PrintAppContent() {
               <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200/80 rounded-xl">
                 <div>
                   <span className="font-bold text-slate-800 block text-xs">Double-Sided (Duplex)</span>
-                  <span className="text-[10px] text-slate-500">Saves paper using automatic two-sided print</span>
+                  <span className="text-[10px] text-slate-500">Automatic two-sided printing</span>
                 </div>
                 <input
                   type="checkbox"
@@ -458,6 +489,34 @@ function PrintAppContent() {
                   onChange={(e) => setIsDuplex(e.target.checked)}
                   className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
                 />
+              </div>
+
+              {/* Orientation Selection */}
+              <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200/80 rounded-xl">
+                <div>
+                  <span className="font-bold text-slate-800 block text-xs">Orientation</span>
+                  <span className="text-[10px] text-slate-500">Page layout direction</span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOrientation('portrait')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold border ${
+                      orientation === 'portrait' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    Portrait
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrientation('landscape')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold border ${
+                      orientation === 'landscape' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    Landscape
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -488,7 +547,7 @@ function PrintAppContent() {
               </span>
               <h3 className="text-xl font-black text-slate-900">Confirm & Pay</h3>
               <p className="text-xs text-slate-500">
-                Verified payment authorizes exactly one print job on the HP printer.
+                Verified payment authorizes exactly one print job on the connected printer.
               </p>
             </div>
 
@@ -497,6 +556,10 @@ function PrintAppContent() {
               <div className="flex justify-between text-slate-600">
                 <span>Job ID:</span>
                 <span className="font-mono font-bold text-slate-900">{jobId}</span>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Organization:</span>
+                <span className="font-semibold text-slate-900">{branding.organization}</span>
               </div>
               <div className="flex justify-between text-slate-600">
                 <span>Document:</span>
@@ -514,7 +577,7 @@ function PrintAppContent() {
               </div>
             </div>
 
-            {/* Test Payment Button */}
+            {/* Payment Button */}
             <div className="space-y-3">
               <button
                 type="button"
@@ -522,12 +585,12 @@ function PrintAppContent() {
                 className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-sm rounded-xl shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2"
               >
                 <CreditCard className="w-4 h-4" />
-                <span>Pay ₹{calculatedAmount.toFixed(2)} via UPI (Instant)</span>
+                <span>Pay ₹{calculatedAmount.toFixed(2)} via UPI / Razorpay</span>
               </button>
 
               <div className="text-center">
                 <span className="text-[10px] text-slate-400">
-                  Razorpay Test Mode Active • Secure 256-Bit SSL Encryption
+                  Razorpay Key: {razorpayKeyId ? `${razorpayKeyId.slice(0, 12)}...` : 'Active'} • 256-Bit SSL Encryption
                 </span>
               </div>
             </div>
@@ -553,7 +616,7 @@ function PrintAppContent() {
               </div>
               <div className="flex items-center gap-2 text-blue-600 font-semibold">
                 <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                <span>Communicating with Kiosk ({kioskId})</span>
+                <span>Dispatched to Kiosk ({kioskId})</span>
               </div>
               {cupsJobId && (
                 <div className="flex items-center gap-2 text-slate-600">
@@ -564,7 +627,7 @@ function PrintAppContent() {
             </div>
 
             <p className="text-[11px] text-slate-400">
-              Please wait at the printer output tray while the document prints.
+              Please wait at the printer output tray while the document finishes printing.
             </p>
           </div>
         )}
@@ -582,7 +645,7 @@ function PrintAppContent() {
               </span>
               <h3 className="text-xl font-black text-slate-900">Collect Your Document</h3>
               <p className="text-xs text-slate-500">
-                Your print job has been completed by the HP printer.
+                Your print job has been printed successfully.
               </p>
             </div>
 
@@ -602,7 +665,7 @@ function PrintAppContent() {
               </div>
               <div className="pt-2 border-t border-emerald-200/60 flex items-center gap-1.5 text-emerald-800 text-[11px] font-medium">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                <span>File Security: Temporary copy permanently deleted.</span>
+                <span>Zero-Retention File Privacy: Temporary document permanently wiped.</span>
               </div>
             </div>
 
@@ -616,7 +679,7 @@ function PrintAppContent() {
           </div>
         )}
 
-        {/* STEP 6: ERROR SCREEN (Safe messaging according to requirement 41) */}
+        {/* STEP 6: ERROR SCREEN */}
         {step === 'ERROR' && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 text-center space-y-5 animate-in fade-in duration-300">
             <div className="w-14 h-14 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
@@ -666,10 +729,10 @@ function PrintAppContent() {
   );
 }
 
-export default function CustomerPrintPage() {
+export default function CustomerPrintPage(props: PrintAppContentProps) {
   return (
     <Suspense fallback={<div className="p-10 text-center font-bold">Loading SmartPrint...</div>}>
-      <PrintAppContent />
+      <PrintAppContent {...props} />
     </Suspense>
   );
 }

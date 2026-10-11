@@ -7,7 +7,7 @@ import urllib.request
 import json
 import time
 
-BASE_URL = "http://localhost:3000"
+BASE_URL = "http://localhost:3001"
 
 def post(endpoint, payload=None, headers=None):
     url = f"{BASE_URL}{endpoint}"
@@ -106,8 +106,9 @@ def run_tests():
         "signature": "mock_sig_test"
     })
     assert verify_res["success"], f"Payment verify failed: {verify_res}"
-    assert verify_res["status"] == "PAYMENT_VERIFIED", f"Unexpected status: {verify_res['status']}"
-    print(f"  [PASS] Payment Verified! Job State: {verify_res['status']}")
+    # After payment verification, job transitions to QUEUED (ready for kiosk polling)
+    assert verify_res["status"] in ("QUEUED", "PAYMENT_VERIFIED"), f"Unexpected status: {verify_res['status']}"
+    print(f"  [PASS] Payment Verified! Job State: {verify_res['status']} (Ready for kiosk dispatch)")
 
     # 7. Kiosk Polling Check
     print("\n[TEST 7] Kiosk Agent Polling Pending Jobs...")

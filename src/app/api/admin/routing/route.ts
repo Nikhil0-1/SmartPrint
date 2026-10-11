@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
 
-export async function GET() {
-  const routings = store.getAllRoutings();
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const orgId = searchParams.get('organization_id');
+  const routings = store.getAllRoutings(orgId || undefined);
   return NextResponse.json({ routings });
 }
 
@@ -17,7 +19,7 @@ export async function POST(request: Request) {
     }
 
     // Capability Safety Check before saving routing overrides
-    const printers = store.getPrintersByKiosk(kiosk_id);
+    const printers = store.getPrinters(undefined, kiosk_id);
 
     if (updates.bw_primary_printer_id) {
       const bwPr = printers.find((p) => p.id === updates.bw_primary_printer_id);
