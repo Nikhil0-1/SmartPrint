@@ -33,7 +33,14 @@ export default function SuperAdminLoginPage() {
         body: JSON.stringify({ email }),
       });
 
-      const data = await res.json();
+      const text = await res.text();
+      let data: { user?: { isSuperAdmin?: boolean; role?: string }; error?: string } = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error(`Authentication server returned error (${res.status}). Please try again.`);
+      }
+
       if (!res.ok || !data.user) {
         throw new Error(data.error || 'Authentication failed');
       }

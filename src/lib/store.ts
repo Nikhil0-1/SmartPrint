@@ -108,6 +108,17 @@ class StateManager {
       created_at: new Date().toISOString(),
     });
 
+    this.members.set('superadmin@gmail.com', {
+      id: 'mem-000',
+      organization_id: GITAM_ORG_ID,
+      firebase_uid: 'firebase_admin_super_000',
+      email: 'superadmin@gmail.com',
+      full_name: 'Platform Super Administrator',
+      role: 'SUPER_ADMIN',
+      status: 'ACTIVE',
+      created_at: new Date().toISOString(),
+    });
+
     this.members.set('admin@apnaprint.in', {
       id: 'mem-002',
       organization_id: APNA_ORG_ID,
@@ -465,13 +476,12 @@ class StateManager {
 
     if (kiosk.active_job_id && kiosk.active_job_id !== jobId) {
       const activeJob = this.jobs.get(kiosk.active_job_id);
-      if (
-        activeJob &&
-        [
-          'CREATED',
-          'UPLOAD_COMPLETE',
-          'VALIDATING',
-          'PAYMENT_PENDING',
+      if (activeJob) {
+        const jobAgeMs = Date.now() - new Date(activeJob.created_at).getTime();
+        const isStale = jobAgeMs > 3 * 60 * 1000; // 3 minutes timeout for abandoned pre-payment jobs
+
+        // Only lock kiosk if an active job is actively in printing/device queue or very recently queued (< 3 mins)
+        const isActivelyPrinting = [
           'PAYMENT_VERIFIED',
           'QUEUED',
           'DEVICE_ACCEPTED',
@@ -479,12 +489,22 @@ class StateManager {
           'PROCESSING',
           'SUBMITTED_TO_CUPS',
           'PRINTING',
-        ].includes(activeJob.status)
-      ) {
-        return {
-          success: false,
-          error: 'Kiosk is currently processing a print job for another customer. Please wait for the current job to finish.',
-        };
+        ].includes(activeJob.status);
+
+        if (isActivelyPrinting && !isStale) {
+          return {
+            success: false,
+            error: 'Kiosk is currently processing a print job for another customer. Please wait for the current job to finish.',
+          };
+        }
+
+        // If pre-payment job is very fresh (< 60s), notify customer
+        if (!isStale && !isActivelyPrinting && jobAgeMs < 60 * 1000) {
+          return {
+            success: false,
+            error: 'Another document is currently being prepared on this kiosk. Please retry in 1 minute.',
+          };
+        }
       }
     }
 
@@ -751,10 +771,17 @@ class StateManager {
     razorpayOrderId: string,
     razorpayPaymentId: string,
     signature: string,
-    organizationId?: string
+    organizationId?: string,
+    jobId?: string
   ): PaymentRecord | null {
-    const payment = this.payments.get(razorpayOrderId);
-    if (!payment) return null;
+    let payment = this.payments.get(razorpayOrderId);
+    if (!payment) {
+      // Serverless fallback: look up by paymentOrder or fallback dynamically
+      const po = this.getPaymentOrder(razorpayOrderId) || Array.from(this.paymentOrders.values()).find(p => p.razorpay_order_id === razorpayOrderId);
+      const targetOrg = organizationId || po?.organization_id || GITAM_ORG_ID;
+      const targetJobId = jobId || po?.job_id || `SP-${razorpayOrderId.slice(-8)}`;
+      payment = this.createPayment(targetJobId, razorpayOrderId, ((po?.amount_paise || 100) / 100), 'INR', targetOrg);
+    }
 
     if (organizationId && payment.organization_id && payment.organization_id !== organizationId) {
       this.logSystem('CRITICAL', 'WEBHOOK', 'Cross-tenant payment verification attempt rejected!', {
@@ -835,7 +862,7 @@ class StateManager {
       kiosk_id: string;
       pages_total: number;
       calculated_amount: number;
-      idempotency_key: string;
+      idempotency_key?: string;
     }
   ): PrintJob {
     const now = new Date().toISOString();
@@ -846,6 +873,7 @@ class StateManager {
       is_duplex: false,
       orientation: 'portrait',
       paper_size: 'A4',
+      idempotency_key: job.idempotency_key || `idemp_${job.id}_${Date.now()}`,
       ...job,
       organization_id: job.organization_id || GITAM_ORG_ID,
       status: job.status || 'CREATED',

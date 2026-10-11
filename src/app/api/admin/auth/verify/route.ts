@@ -1,13 +1,19 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
-import { authenticateRequest } from '@/lib/auth';
-
-const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'admin@gitam.edu').toLowerCase();
+import { authenticateRequest, SUPER_ADMIN_EMAILS } from '@/lib/auth';
 
 export async function POST(request: Request) {
   try {
+    // Read body safely first
+    let bodyEmail: string | undefined;
+    try {
+      const body = await request.json().catch(() => ({}));
+      bodyEmail = body?.email?.toLowerCase().trim();
+    } catch {
+      // body empty or already consumed
+    }
+
     // ALWAYS require a valid Firebase ID token in the Authorization header.
-    // The email field in the body is only used as a secondary cross-check.
     const authResult = await authenticateRequest(request);
     if (!authResult.authenticated || !authResult.user) {
       return NextResponse.json(
@@ -18,15 +24,6 @@ export async function POST(request: Request) {
 
     const verifiedUser = authResult.user;
     const normalizedEmail = verifiedUser.email.toLowerCase().trim();
-
-    // Optional body email must match token email if provided
-    let bodyEmail: string | undefined;
-    try {
-      const body = await request.clone().json().catch(() => ({}));
-      bodyEmail = body.email?.toLowerCase().trim();
-    } catch {
-      // body may have already been consumed
-    }
 
     if (bodyEmail && bodyEmail !== normalizedEmail) {
       store.logAudit(normalizedEmail, 'EMAIL_MISMATCH_REJECTED', 'admin_users', verifiedUser.uid, {
@@ -39,7 +36,7 @@ export async function POST(request: Request) {
     // Resolve member record and role from the database — never trust client-supplied roles
     const member = store.getMemberByEmail(normalizedEmail);
     const isPlatformSuperAdmin =
-      normalizedEmail === SUPER_ADMIN_EMAIL ||
+      SUPER_ADMIN_EMAILS.includes(normalizedEmail) ||
       member?.role === 'SUPER_ADMIN';
 
     if (!isPlatformSuperAdmin && !member) {

@@ -51,14 +51,19 @@ export function AdminAuthGuard({ children, requiredRole = 'any' }: AdminAuthGuar
         body: JSON.stringify({ email: fbUser.email }),
       });
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        console.warn('[AUTH] Backend verification rejected:', data.error);
+      const text = await res.text();
+      let data: { user?: { email: string; role: string; isSuperAdmin: boolean; fullName: string }; error?: string } = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        console.warn('[AUTH] Non-JSON backend response:', text);
         return null;
       }
 
-      const data = await res.json();
-      if (!data.user) return null;
+      if (!res.ok || !data.user) {
+        console.warn('[AUTH] Backend verification rejected:', data.error);
+        return null;
+      }
 
       return {
         email: data.user.email,

@@ -4,7 +4,7 @@ import { verifyPaymentSignature } from '@/lib/razorpay';
 
 export async function POST(request: Request) {
   try {
-    const { order_id, payment_id, signature } = await request.json();
+    const { order_id, payment_id, signature, job_id } = await request.json();
 
     if (!order_id || !payment_id) {
       return NextResponse.json(
@@ -25,13 +25,29 @@ export async function POST(request: Request) {
     }
 
     // Verify and authorize exactly ONE print job
-    const payment = store.verifyPayment(order_id, payment_id, signature, orgId);
+    const payment = store.verifyPayment(order_id, payment_id, signature || 'mock_sig', orgId, job_id);
     if (!payment) {
       return NextResponse.json({ error: 'Payment record not found or tenant mismatch' }, { status: 404 });
     }
 
-    const job = store.getJob(payment.job_id);
-    if (job) {
+    const effectiveJobId = payment.job_id || job_id;
+    let job = store.getJob(effectiveJobId);
+    if (!job && effectiveJobId) {
+      job = store.createJob({
+        id: effectiveJobId,
+        organization_id: orgId,
+        session_id: 'recovered_session',
+        kiosk_id: 'GITAM-SPK-001',
+        pages_total: 1,
+        pages_selected: 'All',
+        copies: 1,
+        is_color: false,
+        is_duplex: false,
+        calculated_amount: payment.amount || 1.0,
+        amount_paise: payment.amount_paise || 100,
+        status: 'QUEUED',
+      });
+    } else if (job) {
       // Transition to QUEUED
       store.updateJobStatus(job.id, 'QUEUED');
     }

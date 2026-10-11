@@ -55,7 +55,51 @@ export async function POST(request: Request) {
     }
 
     if (!job) {
-      return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+      const fallbackPages = Math.max(1, Math.min(Number(pages) || 1, pricing.max_pages));
+      const ratePaise = is_color
+        ? (pricing.color_price_paise || Math.round(pricing.color_price_per_page * 100))
+        : (pricing.bw_price_paise || Math.round(pricing.bw_price_per_page * 100));
+      const servicePaise = Math.round(pricing.service_charge * 100);
+      const minOrderPaise = Math.round(pricing.min_order_amount * 100);
+
+      const basePaise = fallbackPages * copiesNum * ratePaise;
+      const totalPaise = Math.max(minOrderPaise, basePaise + servicePaise);
+      const finalAmountRupees = totalPaise / 100;
+
+      // Reconstruct job in memory for subsequent API steps (like create-order)
+      if (job_id) {
+        job = store.createJob({
+          id: job_id,
+          organization_id: targetOrgId,
+          session_id: 'recovered_session',
+          kiosk_id: 'GITAM-SPK-001',
+          pages_total: fallbackPages,
+          pages_selected: pages_selected || 'All',
+          copies: copiesNum,
+          is_color: Boolean(is_color),
+          is_duplex: Boolean(is_duplex),
+          calculated_amount: finalAmountRupees,
+          amount_paise: totalPaise,
+          status: 'UPLOAD_COMPLETE',
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        amount: finalAmountRupees,
+        amount_paise: totalPaise,
+        total_amount: finalAmountRupees,
+        breakdown: {
+          organization_id: targetOrgId,
+          pages_total: fallbackPages,
+          effective_pages: fallbackPages,
+          copies: copiesNum,
+          rate_per_page: ratePaise / 100,
+          rate_paise: ratePaise,
+          service_charge: pricing.service_charge,
+          is_color: Boolean(is_color),
+        },
+      });
     }
 
     // Calculate effective pages

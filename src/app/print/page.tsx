@@ -202,6 +202,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
           order_id: paymentOrderId,
           payment_id: paymentId,
           signature: mockSignature,
+          job_id: jobId,
         }),
       });
 

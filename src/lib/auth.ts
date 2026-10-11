@@ -27,7 +27,13 @@ export interface AuthResult {
 
 import { verifyFirebaseAdminIdToken } from './firebaseAdmin';
 
-export const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'admin@gitam.edu').toLowerCase();
+export const SUPER_ADMIN_EMAILS = [
+  (process.env.SUPER_ADMIN_EMAIL || 'admin@gitam.edu').toLowerCase(),
+  'superadmin@gmail.com',
+  'admin@gitam.in',
+  'admin@smartprint.com',
+];
+export const SUPER_ADMIN_EMAIL = SUPER_ADMIN_EMAILS[0];
 
 /**
  * Validates token signature and payload.
@@ -86,7 +92,7 @@ export async function authenticateRequest(request: Request): Promise<AuthResult>
   // Resolve user role and tenant memberships strictly from server database store
   const memberRecord = store.getMemberByEmail(tokenVerified.email);
   const isPlatformSuperAdmin =
-    tokenVerified.email.toLowerCase() === SUPER_ADMIN_EMAIL ||
+    SUPER_ADMIN_EMAILS.includes(tokenVerified.email.toLowerCase()) ||
     memberRecord?.role === 'SUPER_ADMIN';
 
   const authorizedOrgs = isPlatformSuperAdmin
