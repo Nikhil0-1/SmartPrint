@@ -1,10 +1,12 @@
-import * as admin from 'firebase-admin';
+import { initializeApp, getApps, cert, type App, type ServiceAccount } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 
 let isInitialized = false;
 
-export function getFirebaseAdminApp(): admin.app.App | null {
-  if (isInitialized && admin.apps.length > 0) {
-    return admin.apps[0]!;
+export function getFirebaseAdminApp(): App | null {
+  const existingApps = getApps();
+  if (isInitialized && existingApps.length > 0) {
+    return existingApps[0]!;
   }
 
   const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
@@ -13,7 +15,7 @@ export function getFirebaseAdminApp(): admin.app.App | null {
   }
 
   try {
-    let serviceAccount: admin.ServiceAccount;
+    let serviceAccount: ServiceAccount;
     if (serviceAccountKey.trim().startsWith('{')) {
       serviceAccount = JSON.parse(serviceAccountKey);
     } else {
@@ -21,8 +23,8 @@ export function getFirebaseAdminApp(): admin.app.App | null {
       serviceAccount = require(serviceAccountKey);
     }
 
-    const app = admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
+    const app = initializeApp({
+      credential: cert(serviceAccount),
       projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || (serviceAccount as any).project_id,
     });
     isInitialized = true;
@@ -39,7 +41,7 @@ export async function verifyFirebaseAdminIdToken(
   const app = getFirebaseAdminApp();
   if (app) {
     try {
-      const decoded = await admin.auth(app).verifyIdToken(token, true);
+      const decoded = await getAuth(app).verifyIdToken(token, true);
       return {
         uid: decoded.uid,
         email: decoded.email || '',
@@ -92,14 +94,14 @@ export async function createAdminUserInFirebase(params: {
   const app = getFirebaseAdminApp();
   if (app) {
     try {
-      const userRecord = await admin.auth(app).createUser({
+      const userRecord = await getAuth(app).createUser({
         email: params.email,
         password: params.password || generateTemporarySecurePassword(),
         displayName: params.displayName,
       });
 
       // Set custom claims for role and organization
-      await admin.auth(app).setCustomUserClaims(userRecord.uid, {
+      await getAuth(app).setCustomUserClaims(userRecord.uid, {
         role: params.role,
         organizationId: params.organizationId,
       });

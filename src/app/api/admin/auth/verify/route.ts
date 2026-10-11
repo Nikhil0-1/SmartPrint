@@ -1,34 +1,49 @@
 import { NextResponse } from 'next/server';
-import { store, GITAM_ORG_ID } from '@/lib/store';
-import { verifyFirebaseIdToken } from '@/lib/auth';
+import { store } from '@/lib/store';
+import { authenticateRequest } from '@/lib/auth';
+
+const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'admin@gitam.edu').toLowerCase();
 
 export async function POST(request: Request) {
   try {
-    const { email, uid, token } = await request.json();
-
-    if (!email) {
-      return NextResponse.json({ error: 'Email is required' }, { status: 400 });
+    // ALWAYS require a valid Firebase ID token in the Authorization header.
+    // The email field in the body is only used as a secondary cross-check.
+    const authResult = await authenticateRequest(request);
+    if (!authResult.authenticated || !authResult.user) {
+      return NextResponse.json(
+        { error: authResult.error || 'Authentication required.' },
+        { status: authResult.status }
+      );
     }
 
-    // If token provided, verify cryptographically / server-side
-    if (token) {
-      const verified = await verifyFirebaseIdToken(token);
-      if (!verified) {
-        return NextResponse.json({ error: 'Invalid or expired Firebase ID token.' }, { status: 401 });
-      }
+    const verifiedUser = authResult.user;
+    const normalizedEmail = verifiedUser.email.toLowerCase().trim();
+
+    // Optional body email must match token email if provided
+    let bodyEmail: string | undefined;
+    try {
+      const body = await request.clone().json().catch(() => ({}));
+      bodyEmail = body.email?.toLowerCase().trim();
+    } catch {
+      // body may have already been consumed
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
+    if (bodyEmail && bodyEmail !== normalizedEmail) {
+      store.logAudit(normalizedEmail, 'EMAIL_MISMATCH_REJECTED', 'admin_users', verifiedUser.uid, {
+        token_email: normalizedEmail,
+        body_email: bodyEmail,
+      });
+      return NextResponse.json({ error: 'Token email does not match request email.' }, { status: 403 });
+    }
 
-    // Look up authorized member record from server database
+    // Resolve member record and role from the database — never trust client-supplied roles
     const member = store.getMemberByEmail(normalizedEmail);
     const isPlatformSuperAdmin =
-      normalizedEmail === 'admin@gitam.edu' ||
+      normalizedEmail === SUPER_ADMIN_EMAIL ||
       member?.role === 'SUPER_ADMIN';
 
-    // If not super admin and no member record exists
     if (!isPlatformSuperAdmin && !member) {
-      store.logAudit(normalizedEmail, 'UNAUTHORIZED_LOGIN_ATTEMPT', 'admin_users', uid, {
+      store.logAudit(normalizedEmail, 'UNAUTHORIZED_LOGIN_ATTEMPT', 'admin_users', verifiedUser.uid, {
         email: normalizedEmail,
         result: 'REJECTED_NOT_A_MEMBER',
       });
@@ -43,7 +58,7 @@ export async function POST(request: Request) {
       ? store.getOrganizations().map((o) => o.id)
       : store.getOrganizationsForMember(normalizedEmail);
 
-    store.logAudit(normalizedEmail, 'ADMIN_LOGIN_SUCCESS', 'admin_users', uid || 'firebase_uid', {
+    store.logAudit(normalizedEmail, 'ADMIN_LOGIN_SUCCESS', 'admin_users', verifiedUser.uid, {
       role,
       organizations: authorizedOrganizationIds,
       auth_provider: 'firebase',
@@ -54,7 +69,7 @@ export async function POST(request: Request) {
       success: true,
       user: {
         email: normalizedEmail,
-        uid: uid || member?.firebase_uid || 'firebase_uid',
+        uid: verifiedUser.uid,
         fullName: member?.full_name || (isPlatformSuperAdmin ? 'Platform Super Admin' : 'Admin'),
         role,
         isSuperAdmin: isPlatformSuperAdmin,
@@ -65,6 +80,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
+

@@ -19,18 +19,8 @@ export default function AdminLoginPage() {
     setError('');
 
     try {
-      let idToken = '';
-      try {
-        const cred = await signInWithEmailAndPassword(auth, email, password);
-        idToken = await cred.user.getIdToken();
-      } catch (fbErr: any) {
-        // Fallback for campus test/dev accounts
-        if (password === 'admin123' || password === 'gitam2026' || password === 'apna2026' || password.length >= 6) {
-          idToken = 'gitam_admin_secret_2026';
-        } else {
-          throw fbErr;
-        }
-      }
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      const idToken = await cred.user.getIdToken();
 
       // Verify role & organization membership with backend
       const res = await fetch('/api/admin/auth/verify', {

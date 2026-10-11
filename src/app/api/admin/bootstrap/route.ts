@@ -1,22 +1,23 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
-import { createAdminUserInFirebase } from '@/lib/firebaseAdmin';
+import { createAdminUserInFirebase, generateTemporarySecurePassword } from '@/lib/firebaseAdmin';
 
 export async function POST(request: Request) {
   try {
     const authHeader = request.headers.get('authorization') || '';
-    const secret = process.env.ADMIN_SECRET_TOKEN || 'gitam_admin_secret_2026';
+    const secret = process.env.ADMIN_SECRET_TOKEN;
 
-    const isAuthorized =
-      authHeader.includes(secret) ||
-      authHeader.includes('Bearer ' + secret);
+    if (!secret) {
+      return NextResponse.json({ error: 'ADMIN_SECRET_TOKEN not configured on server' }, { status: 500 });
+    }
 
-    if (!isAuthorized) {
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
+    if (token !== secret) {
       return NextResponse.json({ error: 'Unauthorized bootstrap attempt' }, { status: 401 });
     }
 
     const superAdminEmail = (process.env.SUPER_ADMIN_EMAIL || 'admin@gitam.edu').toLowerCase();
-    const superAdminPassword = process.env.SUPER_ADMIN_INITIAL_PASSWORD || 'GitamSuperAdmin@2026';
+    const superAdminPassword = process.env.SUPER_ADMIN_INITIAL_PASSWORD || generateTemporarySecurePassword();
     const superAdminName = process.env.SUPER_ADMIN_NAME || 'Platform Super Admin';
 
     // 1. Check existing

@@ -48,8 +48,9 @@ export async function verifyFirebaseIdToken(token: string): Promise<{ uid: strin
     return { uid: adminResult.uid, email: adminResult.email };
   }
 
-  // 2. Local development / campus deployment token check
-  if (cleanToken === process.env.ADMIN_SECRET_TOKEN || cleanToken === 'gitam_admin_secret_2026') {
+  // 2. Local development bootstrap token (must be set via env var, no hardcoded fallback)
+  const adminSecretToken = process.env.ADMIN_SECRET_TOKEN;
+  if (adminSecretToken && cleanToken === adminSecretToken) {
     return {
       uid: 'super_admin_system_local',
       email: SUPER_ADMIN_EMAIL,

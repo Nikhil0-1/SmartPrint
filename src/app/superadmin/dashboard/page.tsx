@@ -1,8 +1,10 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
 import {
   Building2,
   Plus,
@@ -55,27 +57,43 @@ export default function SuperAdminDashboardPage() {
   const [createdAdminCreds, setCreatedAdminCreds] = useState<{ email: string; tempPass: string } | null>(null);
   const [isSubmittingAdmin, setIsSubmittingAdmin] = useState(false);
 
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3500);
   };
 
-  const getAuthToken = () => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('smartprint_admin_token') || 'gitam_admin_secret_2026';
+  const getAuthToken = useCallback(async (): Promise<string | null> => {
+    if (firebaseUser) {
+      try {
+        return await firebaseUser.getIdToken(false);
+      } catch {
+        return null;
+      }
     }
-    return 'gitam_admin_secret_2026';
-  };
+    return null;
+  }, [firebaseUser]);
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
-      const token = getAuthToken();
+      const token = await getAuthToken();
+      if (!token) {
+        router.push('/superadmin/login');
+        return;
+      }
       const headers = { Authorization: `Bearer ${token}` };
 
       const [orgsRes, dataRes] = await Promise.all([
         fetch('/api/admin/organizations', { headers }),
         fetch('/api/admin/data', { headers }),
       ]);
+
+      if (orgsRes.status === 401 || dataRes.status === 401) {
+        router.push('/superadmin/login');
+        return;
+      }
 
       const orgsData = await orgsRes.json();
       if (orgsData.organizations) setOrganizations(orgsData.organizations);
@@ -93,16 +111,32 @@ export default function SuperAdminDashboardPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [getAuthToken, router]);
 
+  // Watch Firebase auth state
   useEffect(() => {
-    fetchData();
-  }, []);
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+      setAuthChecked(true);
+      if (!user) {
+        router.push('/superadmin/login');
+      }
+    });
+    return () => unsubscribe();
+  }, [router]);
 
-  const handleLogout = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('smartprint_admin_token');
-      localStorage.removeItem('smartprint_user_role');
+  // Fetch data when user is authenticated
+  useEffect(() => {
+    if (authChecked && firebaseUser) {
+      fetchData();
+    }
+  }, [authChecked, firebaseUser, fetchData]);
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.error('[AUTH] Logout error:', e);
     }
     router.push('/superadmin/login');
   };

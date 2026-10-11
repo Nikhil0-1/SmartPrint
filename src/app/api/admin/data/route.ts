@@ -1,60 +1,74 @@
 import { NextResponse } from 'next/server';
-import { store, GITAM_ORG_ID } from '@/lib/store';
+import { store } from '@/lib/store';
+import { authenticateRequest } from '@/lib/auth';
 
 export async function GET(request: Request) {
+  // Require authentication on every call
+  const authResult = await authenticateRequest(request);
+  if (!authResult.authenticated || !authResult.user) {
+    return NextResponse.json(
+      { error: authResult.error || 'Authentication required.' },
+      { status: authResult.status }
+    );
+  }
+
+  const callerUser = authResult.user;
   const { searchParams } = new URL(request.url);
   const requestedOrgId = searchParams.get('organization_id') || searchParams.get('org_id');
   const orgSlug = searchParams.get('slug') || searchParams.get('org');
 
-  let orgFilter = requestedOrgId;
-  if (!orgFilter && orgSlug) {
+  let resolvedOrgId: string | undefined = requestedOrgId || undefined;
+  if (!resolvedOrgId && orgSlug) {
     const org = store.getOrganizationBySlug(orgSlug);
-    if (org) orgFilter = org.id;
+    if (org) resolvedOrgId = org.id;
   }
 
-  // Get data scoped to organization if specified
-  const organizations = store.getOrganizations();
-  const effectiveOrgId = orgFilter || GITAM_ORG_ID;
+  // Enforce tenant isolation: org admins can only see their own org
+  if (resolvedOrgId && !callerUser.isSuperAdmin) {
+    if (!callerUser.authorizedOrganizationIds.includes(resolvedOrgId)) {
+      store.logAudit(callerUser.email, 'CROSS_TENANT_ACCESS_BLOCKED', 'organization', resolvedOrgId, {
+        caller_orgs: callerUser.authorizedOrganizationIds,
+      });
+      return NextResponse.json({ error: 'Access denied: You are not authorized to view this organization.' }, { status: 403 });
+    }
+  }
 
-  const kiosks = store.getKiosks(orgFilter || undefined);
-  const printers = store.getPrinters(orgFilter || undefined);
-  const routings = store.getAllRoutings(orgFilter || undefined);
-  const jobs = store.getAllJobs(orgFilter || undefined);
-  const payments = store.getPayments(orgFilter || undefined);
-  const branding = store.getBranding(effectiveOrgId);
-  const pricing = store.getPricing(effectiveOrgId);
-  const systemLogs = store.getSystemLogs(40, orgFilter || undefined);
-  const auditLogs = store.getAuditLogs(40, orgFilter || undefined);
-  const paymentConfig = store.getPaymentConfig(effectiveOrgId);
-  const members = store.getMembers(orgFilter || undefined);
-  const locations = store.getLocations(orgFilter || undefined);
-  const devices = store.getDevices(orgFilter || undefined);
+  // Determine effective org scope
+  const effectiveOrgId: string | undefined = callerUser.isSuperAdmin
+    ? (resolvedOrgId || undefined)
+    : callerUser.authorizedOrganizationIds[0];
 
-  // Calculate dashboard statistics (Accurate: Verified/Completed only!)
+  const organizations = callerUser.isSuperAdmin
+    ? store.getOrganizations()
+    : store.getOrganizations().filter((o) => callerUser.authorizedOrganizationIds.includes(o.id));
+
+  const kiosks = store.getKiosks(effectiveOrgId);
+  const printers = store.getPrinters(effectiveOrgId);
+  const routings = store.getAllRoutings(effectiveOrgId);
+  const jobs = store.getAllJobs(effectiveOrgId);
+  const payments = store.getPayments(effectiveOrgId);
+  const branding = effectiveOrgId ? store.getBranding(effectiveOrgId) : null;
+  const pricing = effectiveOrgId ? store.getPricing(effectiveOrgId) : null;
+  const systemLogs = store.getSystemLogs(40, effectiveOrgId);
+  const auditLogs = callerUser.isSuperAdmin ? store.getAuditLogs(40, effectiveOrgId) : [];
+  const paymentConfig = effectiveOrgId ? store.getPaymentConfig(effectiveOrgId) : null;
+  const members = store.getMembers(effectiveOrgId);
+  const locations = store.getLocations(effectiveOrgId);
+  const devices = store.getDevices(effectiveOrgId);
+
+  // Dashboard statistics (verified/completed only)
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  const todayJobs = jobs.filter(
-    (j) => new Date(j.created_at).getTime() >= todayStart.getTime()
-  );
-
+  const todayJobs = jobs.filter((j) => new Date(j.created_at).getTime() >= todayStart.getTime());
   const completedJobs = jobs.filter((j) => j.status === 'COMPLETED');
   const todayCompletedJobs = todayJobs.filter((j) => j.status === 'COMPLETED');
-
-  const todayRevenue = todayCompletedJobs.reduce(
-    (acc, j) => acc + (j.calculated_amount || 0),
-    0
-  );
-
-  const totalRevenue = completedJobs.reduce(
-    (acc, j) => acc + (j.calculated_amount || 0),
-    0
-  );
-
+  const todayRevenue = todayCompletedJobs.reduce((acc, j) => acc + (j.calculated_amount || 0), 0);
+  const totalRevenue = completedJobs.reduce((acc, j) => acc + (j.calculated_amount || 0), 0);
   const failedJobs = jobs.filter((j) => j.status === 'FAILED');
   const recoveryRequired = jobs.filter((j) => j.status === 'RECOVERY_REQUIRED');
 
-  // Mask payment secrets before returning
+  // Mask payment secrets before returning to client
   const safePaymentConfig = paymentConfig
     ? {
         ...paymentConfig,
@@ -93,3 +107,4 @@ export async function GET(request: Request) {
     audit_logs: auditLogs,
   });
 }
+

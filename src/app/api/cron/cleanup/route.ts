@@ -6,15 +6,16 @@ import { permanentlyDeleteDocument } from '@/lib/fileSecurity';
 export async function POST(request: Request) {
   try {
     const authHeader = request.headers.get('authorization') || '';
-    const cronSecret = process.env.CRON_SECRET || 'smartprint_cron_secret_2026';
+    const cronSecret = process.env.CRON_SECRET;
+    const adminSecret = process.env.ADMIN_SECRET_TOKEN;
 
-    // Verify cron authorization or admin token
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
+
     const isAuthorized =
-      authHeader.includes(cronSecret) ||
-      authHeader.includes('Bearer ') ||
-      authHeader.includes(process.env.ADMIN_SECRET_TOKEN || 'gitam_admin_secret_2026');
+      (Boolean(cronSecret) && token === cronSecret) ||
+      (Boolean(adminSecret) && token === adminSecret);
 
-    if (!isAuthorized && process.env.NODE_ENV === 'production') {
+    if (!isAuthorized) {
       return NextResponse.json({ error: 'Unauthorized cron caller' }, { status: 401 });
     }
 

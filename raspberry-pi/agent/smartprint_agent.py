@@ -202,6 +202,17 @@ class SmartPrintAgent:
         cleanup_stale_temp_files()
         self.running = True
 
+    def get_ssl_context(self):
+        """Creates SSL context with secure certificate verification by default."""
+        insecure = os.getenv("SMARTPRINT_INSECURE_SSL", "").lower() in ("1", "true", "yes") or not self.config.get("verify_ssl", True)
+        if insecure:
+            logging.warning("Insecure SSL context in use: TLS certificate verification is disabled.")
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return ctx
+        return ssl.create_default_context()
+
     def make_api_request(self, endpoint, payload=None, method="POST"):
         """Sends authenticated request to Cloud Backend."""
         url = f"{self.config['backend_url']}{endpoint}"
@@ -216,10 +227,7 @@ class SmartPrintAgent:
         data = json.dumps(payload).encode("utf-8") if payload else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
-        # Allow self-signed or standard SSL context
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx = self.get_ssl_context()
 
         try:
             with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
@@ -295,9 +303,7 @@ class SmartPrintAgent:
         try:
             # 2. Securely Download temporary document
             logging.info(f"Downloading temporary document for job {job_id}...")
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            ctx = self.get_ssl_context()
 
             req = urllib.request.Request(download_url, headers={"User-Agent": "GITAM-SmartPrint-Agent/1.0"})
             with urllib.request.urlopen(req, timeout=30, context=ctx) as resp, open(local_file_path, "wb") as f:

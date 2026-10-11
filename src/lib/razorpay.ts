@@ -76,19 +76,8 @@ export async function createMultiTenantRazorpayOrder(
     }
   }
 
-  // Provider test mode fallback for local campus testing when real credentials are not yet entered
-  const orderId = `order_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
-  return {
-    id: orderId,
-    entity: 'order',
-    amount: amountPaise,
-    amount_paid: 0,
-    amount_due: amountPaise,
-    currency: 'INR',
-    receipt: receiptId,
-    status: 'created',
-    created_at: Math.floor(Date.now() / 1000),
-  };
+  // No valid Razorpay credentials configured — fail with a clear error
+  throw new Error('CONFIGURATION_REQUIRED: Razorpay credentials are not configured for this organization. Set up payment credentials in the admin panel.');
 }
 
 export function verifyPaymentSignature(
@@ -98,11 +87,11 @@ export function verifyPaymentSignature(
   organizationId: string = GITAM_ORG_ID
 ): boolean {
   const config = store.getPaymentConfig(organizationId);
-  const secret = config?.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET || 'secret_gitam_smartprint_2026';
+  const secret = config?.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET;
 
-  // Test mode signature check
-  if (process.env.NODE_ENV !== 'production' && signature.startsWith('mock_sig_')) {
-    return true;
+  if (!secret) {
+    console.error('[RAZORPAY] No key secret configured for payment signature verification.');
+    return false;
   }
 
   const generatedSignature = crypto
@@ -110,7 +99,10 @@ export function verifyPaymentSignature(
     .update(`${orderId}|${paymentId}`)
     .digest('hex');
 
-  return generatedSignature === signature;
+  return crypto.timingSafeEqual(
+    Buffer.from(generatedSignature, 'hex'),
+    Buffer.from(signature, 'hex')
+  );
 }
 
 export function verifyWebhookSignature(
@@ -121,12 +113,24 @@ export function verifyWebhookSignature(
   if (!signatureHeader) return false;
 
   const config = store.getPaymentConfig(organizationId);
-  const secret = config?.webhook_secret || process.env.RAZORPAY_WEBHOOK_SECRET || 'webhook_secret_gitam_smartprint';
+  const secret = config?.webhook_secret || process.env.RAZORPAY_WEBHOOK_SECRET;
+
+  if (!secret) {
+    console.error('[RAZORPAY] No webhook secret configured for signature verification.');
+    return false;
+  }
 
   const expectedSignature = crypto
     .createHmac('sha256', secret)
     .update(rawBody)
     .digest('hex');
 
-  return expectedSignature === signatureHeader;
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(expectedSignature, 'hex'),
+      Buffer.from(signatureHeader, 'hex')
+    );
+  } catch {
+    return false;
+  }
 }

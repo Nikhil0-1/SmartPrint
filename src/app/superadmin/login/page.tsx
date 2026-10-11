@@ -20,17 +20,8 @@ export default function SuperAdminLoginPage() {
 
     try {
       let idToken = '';
-      try {
-        const cred = await signInWithEmailAndPassword(auth, email, password);
-        idToken = await cred.user.getIdToken();
-      } catch (fbErr: any) {
-        // Fallback for dev / token authorization
-        if (password === 'GitamSuperAdmin@2026' || password === 'admin123' || password === 'gitam2026') {
-          idToken = 'gitam_admin_secret_2026';
-        } else {
-          throw fbErr;
-        }
-      }
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      idToken = await cred.user.getIdToken();
 
       // Verify role with backend
       const res = await fetch('/api/admin/auth/verify', {

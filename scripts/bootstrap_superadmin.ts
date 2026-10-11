@@ -15,11 +15,11 @@
  */
 
 import { store, GITAM_ORG_ID } from '../src/lib/store';
-import { createAdminUserInFirebase } from '../src/lib/firebaseAdmin';
+import { createAdminUserInFirebase, generateTemporarySecurePassword } from '../src/lib/firebaseAdmin';
 
 async function bootstrapSuperAdmin() {
   const superAdminEmail = (process.env.SUPER_ADMIN_EMAIL || 'admin@gitam.edu').toLowerCase();
-  const superAdminPassword = process.env.SUPER_ADMIN_INITIAL_PASSWORD || 'GitamSuperAdmin@2026';
+  const superAdminPassword = process.env.SUPER_ADMIN_INITIAL_PASSWORD || generateTemporarySecurePassword();
   const superAdminName = process.env.SUPER_ADMIN_NAME || 'Platform Super Admin';
 
   console.log('='.repeat(65));
