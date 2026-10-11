@@ -44,10 +44,16 @@ interface CurrentAdmin {
   onLogout: () => void;
 }
 
-function AdminDashboardContent({ currentUser }: { currentUser: CurrentAdmin }) {
+function AdminDashboardContent({
+  currentUser,
+  initialTab = 'dashboard',
+}: {
+  currentUser: CurrentAdmin;
+  initialTab?: 'dashboard' | 'kiosks' | 'printers' | 'routing' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings';
+}) {
   const [activeTab, setActiveTab] = useState<
     'dashboard' | 'kiosks' | 'printers' | 'routing' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings'
-  >('dashboard');
+  >(initialTab);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [adminData, setAdminData] = useState<any>(null);
@@ -1232,10 +1238,14 @@ function AdminDashboardContent({ currentUser }: { currentUser: CurrentAdmin }) {
   );
 }
 
-export default function AdminPanelPage() {
+export default function AdminPanelPage({
+  initialTab,
+}: {
+  initialTab?: 'dashboard' | 'kiosks' | 'printers' | 'routing' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings';
+}) {
   return (
     <AdminAuthGuard>
-      {(currentUser) => <AdminDashboardContent currentUser={currentUser} />}
+      {(currentUser) => <AdminDashboardContent currentUser={currentUser} initialTab={initialTab} />}
     </AdminAuthGuard>
   );
 }

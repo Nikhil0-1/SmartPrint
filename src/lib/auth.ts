@@ -25,10 +25,13 @@ export interface AuthResult {
   status: number;
 }
 
+import { verifyFirebaseAdminIdToken } from './firebaseAdmin';
+
+export const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'admin@gitam.edu').toLowerCase();
+
 /**
  * Validates token signature and payload.
- * In production with FIREBASE_ADMIN_SERVICE_ACCOUNT configured, verifies cryptographic
- * signature with Firebase Admin SDK.
+ * Cryptographically verifies token signature via Firebase Admin SDK if service account is configured.
  * In local environment without a service account JSON, validates token structure,
  * issuer, audience, expiry, and matches against authorized admins in database.
  */
@@ -39,51 +42,17 @@ export async function verifyFirebaseIdToken(token: string): Promise<{ uid: strin
   const cleanToken = token.startsWith('Bearer ') ? token.slice(7).trim() : token.trim();
   if (!cleanToken) return null;
 
-  // If Firebase Admin credentials are fully configured in process.env
-  const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
-  if (serviceAccount) {
-    try {
-      // Firebase Admin token verification
-      // Dynamically load to prevent client bundle leakage
-      // In production, verifies token signature with Google's public certs
-      return { uid: 'verified_admin_uid', email: 'admin@gitam.edu' };
-    } catch (e) {
-      console.error('[AUTH ERROR] Firebase token verification failed:', e);
-      return null;
-    }
+  // 1. Try Firebase Admin verification (or validated JWT payload)
+  const adminResult = await verifyFirebaseAdminIdToken(cleanToken);
+  if (adminResult && adminResult.email) {
+    return { uid: adminResult.uid, email: adminResult.email };
   }
 
-  // Trusted JWT verification fallback for local campus deployment & test mode:
-  // Parses payload, verifies standard claims: exp, iat, aud, iss, email
-  try {
-    const parts = cleanToken.split('.');
-    if (parts.length === 3) {
-      const payloadBase64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-      const payloadJson = Buffer.from(payloadBase64, 'base64').toString('utf8');
-      const payload = JSON.parse(payloadJson);
-
-      const nowSec = Math.floor(Date.now() / 1000);
-      if (payload.exp && payload.exp < nowSec) {
-        console.warn('[AUTH WARNING] Token has expired.');
-        return null;
-      }
-
-      if (payload.user_id || payload.sub || payload.uid) {
-        return {
-          uid: payload.user_id || payload.sub || payload.uid,
-          email: payload.email || '',
-        };
-      }
-    }
-  } catch {
-    // If not standard JWT format, check dev authorization token
-  }
-
-  // Local development / campus deployment token check
+  // 2. Local development / campus deployment token check
   if (cleanToken === process.env.ADMIN_SECRET_TOKEN || cleanToken === 'gitam_admin_secret_2026') {
     return {
       uid: 'super_admin_system_local',
-      email: 'admin@gitam.edu',
+      email: SUPER_ADMIN_EMAIL,
     };
   }
 
@@ -116,7 +85,7 @@ export async function authenticateRequest(request: Request): Promise<AuthResult>
   // Resolve user role and tenant memberships strictly from server database store
   const memberRecord = store.getMemberByEmail(tokenVerified.email);
   const isPlatformSuperAdmin =
-    tokenVerified.email.toLowerCase() === 'admin@gitam.edu' ||
+    tokenVerified.email.toLowerCase() === SUPER_ADMIN_EMAIL ||
     memberRecord?.role === 'SUPER_ADMIN';
 
   const authorizedOrgs = isPlatformSuperAdmin

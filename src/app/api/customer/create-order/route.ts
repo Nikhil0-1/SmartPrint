@@ -40,7 +40,16 @@ export async function POST(request: Request) {
     // Assign chosen printer to job
     job.printer_id = printerCheck.printer.id;
 
-    const amountPaise = job.amount_paise || Math.round(job.calculated_amount * 100);
+        const amountPaise = job.amount_paise || Math.round(job.calculated_amount * 100);
+
+    // Validate payment configuration status
+    const paymentConfig = store.getPaymentConfig(organizationId);
+    if (!paymentConfig || paymentConfig.status !== 'CONFIGURED') {
+      return NextResponse.json(
+        { error: 'Payment configuration not properly set for organization.', code: 'PAYMENT_CONFIG_INVALID' },
+        { status: 400 }
+      );
+    }
 
     // Create Order with organization's configured Razorpay credentials
     const order = await createMultiTenantRazorpayOrder(
