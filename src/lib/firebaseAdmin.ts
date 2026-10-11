@@ -1,3 +1,4 @@
+import fs from 'fs';
 import { initializeApp, getApps, cert, type App, type ServiceAccount } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 
@@ -17,15 +18,19 @@ export function getFirebaseAdminApp(): App | null {
   try {
     let serviceAccount: ServiceAccount;
     if (serviceAccountKey.trim().startsWith('{')) {
-      serviceAccount = JSON.parse(serviceAccountKey);
+      serviceAccount = JSON.parse(serviceAccountKey) as ServiceAccount;
     } else {
       // Path to file
-      serviceAccount = require(serviceAccountKey);
+      const raw = fs.readFileSync(serviceAccountKey, 'utf-8');
+      serviceAccount = JSON.parse(raw) as ServiceAccount;
     }
+
+    const saRecord = serviceAccount as Record<string, unknown>;
+    const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || (typeof saRecord.project_id === 'string' ? saRecord.project_id : undefined);
 
     const app = initializeApp({
       credential: cert(serviceAccount),
-      projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || (serviceAccount as any).project_id,
+      projectId,
     });
     isInitialized = true;
     return app;
@@ -37,7 +42,7 @@ export function getFirebaseAdminApp(): App | null {
 
 export async function verifyFirebaseAdminIdToken(
   token: string
-): Promise<{ uid: string; email: string; customClaims?: Record<string, any> } | null> {
+): Promise<{ uid: string; email: string; customClaims?: Record<string, unknown> } | null> {
   const app = getFirebaseAdminApp();
   if (app) {
     try {

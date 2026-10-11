@@ -52,8 +52,9 @@ export default function AdminLoginPage() {
       } else {
         router.push('/admin/dashboard');
       }
-    } catch (err: any) {
-      setError(err.message || 'Invalid administrator credentials.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Invalid administrator credentials.';
+      setError(msg);
     } finally {
       setLoading(false);
     }

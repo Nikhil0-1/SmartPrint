@@ -50,8 +50,9 @@ export default function SuperAdminLoginPage() {
         localStorage.setItem('smartprint_user_role', 'SUPER_ADMIN');
       }
       router.push('/superadmin/dashboard');
-    } catch (err: any) {
-      setError(err.message || 'Invalid Super Admin credentials.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Invalid Super Admin credentials.';
+      setError(msg);
     } finally {
       setLoading(false);
     }

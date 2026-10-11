@@ -113,8 +113,8 @@ export function AdminAuthGuard({ children, requiredRole = 'any' }: AdminAuthGuar
     try {
       await signInWithEmailAndPassword(auth, email.trim(), password);
       // onAuthStateChanged handles the rest
-    } catch (err: any) {
-      const code = err?.code || '';
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code || '';
       if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
         setAuthError('Invalid email or password.');
       } else if (code === 'auth/too-many-requests') {

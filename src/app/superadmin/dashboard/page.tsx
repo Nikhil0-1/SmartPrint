@@ -24,17 +24,17 @@ import {
   Lock,
   Key,
 } from 'lucide-react';
-import { Organization, OrganizationMember } from '@/lib/types';
+import { Organization, OrganizationMember, Kiosk, Device, PrintJob, PaymentRecord, AuditLog } from '@/lib/types';
 
 export default function SuperAdminDashboardPage() {
   const router = useRouter();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [members, setMembers] = useState<OrganizationMember[]>([]);
-  const [kiosks, setKiosks] = useState<any[]>([]);
-  const [devices, setDevices] = useState<any[]>([]);
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [payments, setPayments] = useState<any[]>([]);
-  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [kiosks, setKiosks] = useState<Kiosk[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [jobs, setJobs] = useState<PrintJob[]>([]);
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'organizations' | 'admins' | 'devices' | 'jobs' | 'payments' | 'audit'>('overview');
 
@@ -127,9 +127,17 @@ export default function SuperAdminDashboardPage() {
 
   // Fetch data when user is authenticated
   useEffect(() => {
+    let active = true;
     if (authChecked && firebaseUser) {
-      fetchData();
+      void (async () => {
+        if (active) {
+          await fetchData();
+        }
+      })();
     }
+    return () => {
+      active = false;
+    };
   }, [authChecked, firebaseUser, fetchData]);
 
   const handleLogout = async () => {
@@ -145,11 +153,17 @@ export default function SuperAdminDashboardPage() {
     e.preventDefault();
     setIsSubmittingOrg(true);
     try {
+      const token = await getAuthToken();
+      if (!token) {
+        showToast('Authentication required', 'error');
+        setIsSubmittingOrg(false);
+        return;
+      }
       const res = await fetch('/api/admin/organizations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${getAuthToken()}`,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           name: orgName,
@@ -179,11 +193,17 @@ export default function SuperAdminDashboardPage() {
     e.preventDefault();
     setIsSubmittingAdmin(true);
     try {
+      const token = await getAuthToken();
+      if (!token) {
+        showToast('Authentication required', 'error');
+        setIsSubmittingAdmin(false);
+        return;
+      }
       const res = await fetch('/api/admin/create-admin', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${getAuthToken()}`,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           display_name: adminDisplayName,
@@ -233,8 +253,16 @@ export default function SuperAdminDashboardPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <span className="text-xs text-slate-300 font-mono">admin@gitam.edu</span>
+            <button
+              onClick={() => fetchData()}
+              disabled={loading}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-all disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
             <button
               onClick={handleLogout}
               className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-all"
@@ -262,7 +290,7 @@ export default function SuperAdminDashboardPage() {
             ].map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
+                onClick={() => setActiveTab(tab.id as typeof activeTab)}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
                   activeTab === tab.id
                     ? 'bg-slate-900 text-white shadow-sm'

@@ -631,37 +631,47 @@ class StateManager {
       return { success: false, error_message: 'No enabled printers found at this kiosk.' };
     }
 
+    let chosen: Printer | undefined;
+
     if (isColor) {
-      let chosen: Printer | undefined;
       if (routing?.color_primary_printer_id) {
         chosen = this.printers.get(routing.color_primary_printer_id);
       }
-      if (!chosen || chosen.status !== 'READY') {
-        chosen = printers.find((p) => p.supports_color && p.status === 'READY');
+      if (!chosen || chosen.status !== 'READY' || (isDuplex && !chosen.supports_duplex)) {
+        chosen = printers.find((p) => p.supports_color && p.status === 'READY' && (!isDuplex || p.supports_duplex));
       }
       if (!chosen && routing?.auto_backup_enabled && routing.color_backup_printer_id) {
         chosen = this.printers.get(routing.color_backup_printer_id);
       }
-      if (!chosen) {
-        return { success: false, error_message: 'Color printer is currently unavailable or out of paper.' };
+      if (!chosen || (isDuplex && !chosen.supports_duplex)) {
+        return {
+          success: false,
+          error_message: isDuplex
+            ? 'No color printer with two-sided (duplex) capability is currently ready.'
+            : 'Color printer is currently unavailable or out of paper.',
+        };
       }
       return { success: true, printer: chosen };
     } else {
-      let chosen: Printer | undefined;
       if (routing?.bw_primary_printer_id) {
         chosen = this.printers.get(routing.bw_primary_printer_id);
       }
-      if (!chosen || chosen.status !== 'READY') {
-        chosen = printers.find((p) => !p.supports_color && p.status === 'READY');
+      if (!chosen || chosen.status !== 'READY' || (isDuplex && !chosen.supports_duplex)) {
+        chosen = printers.find((p) => !p.supports_color && p.status === 'READY' && (!isDuplex || p.supports_duplex));
       }
       if (!chosen && routing?.auto_backup_enabled && routing.bw_backup_printer_id) {
         chosen = this.printers.get(routing.bw_backup_printer_id);
       }
-      if (!chosen) {
-        chosen = printers.find((p) => p.status === 'READY');
+      if (!chosen || (isDuplex && !chosen.supports_duplex)) {
+        chosen = printers.find((p) => p.status === 'READY' && (!isDuplex || p.supports_duplex));
       }
       if (!chosen) {
-        return { success: false, error_message: 'B&W printer is currently offline or experiencing an error.' };
+        return {
+          success: false,
+          error_message: isDuplex
+            ? 'No printer with two-sided (duplex) capability is currently ready.'
+            : 'B&W printer is currently offline or experiencing an error.',
+        };
       }
       return { success: true, printer: chosen };
     }
