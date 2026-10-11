@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
+import { authenticateRequest } from '@/lib/auth';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -10,8 +11,13 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const auth = await authenticateRequest(request);
+    if (!auth.authenticated || !auth.user) {
+      return NextResponse.json({ error: auth.error || 'Authentication required' }, { status: auth.status });
+    }
+
     const body = await request.json();
-    const adminEmail = request.headers.get('x-admin-email') || 'admin@gitam.edu';
+    const adminEmail = auth.user.email;
     const { kiosk_id, ...updates } = body;
 
     if (!kiosk_id) {

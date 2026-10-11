@@ -1,10 +1,16 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
+import { authenticateRequest } from '@/lib/auth';
 
 export async function POST(request: Request) {
   try {
+    const auth = await authenticateRequest(request);
+    if (!auth.authenticated || !auth.user) {
+      return NextResponse.json({ error: auth.error || 'Authentication required' }, { status: auth.status });
+    }
+
     const { printer_id, kiosk_id } = await request.json();
-    const adminEmail = request.headers.get('x-admin-email') || 'admin@gitam.edu';
+    const adminEmail = auth.user.email;
 
     if (!printer_id && !kiosk_id) {
       return NextResponse.json({ error: 'printer_id or kiosk_id is required' }, { status: 400 });

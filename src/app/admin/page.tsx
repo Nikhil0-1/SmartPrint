@@ -22,6 +22,12 @@ import {
   Zap,
   Sliders,
   Save,
+  KeyRound,
+  Copy,
+  Check,
+  Eye,
+  EyeOff,
+  Radio,
 } from 'lucide-react';
 import {
   BarChart,
@@ -37,6 +43,7 @@ import {
 import { DEFAULT_BRANDING, DEFAULT_PRICING } from '@/lib/constants';
 import { AdminAuthGuard } from '@/components/AdminAuthGuard';
 import { LogOut, UserCheck } from 'lucide-react';
+import { auth } from '@/lib/firebase';
 
 interface CurrentAdmin {
   email: string;
@@ -44,16 +51,28 @@ interface CurrentAdmin {
   onLogout: () => void;
 }
 
+export type AdminTab =
+  | 'dashboard'
+  | 'kiosks'
+  | 'printers'
+  | 'routing'
+  | 'jobs'
+  | 'payments'
+  | 'payment_gateway'
+  | 'pricing'
+  | 'branding'
+  | 'telemetry'
+  | 'audit'
+  | 'settings';
+
 function AdminDashboardContent({
   currentUser,
   initialTab = 'dashboard',
 }: {
   currentUser: CurrentAdmin;
-  initialTab?: 'dashboard' | 'kiosks' | 'printers' | 'routing' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings';
+  initialTab?: AdminTab;
 }) {
-  const [activeTab, setActiveTab] = useState<
-    'dashboard' | 'kiosks' | 'printers' | 'routing' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings'
-  >(initialTab);
+  const [activeTab, setActiveTab] = useState<AdminTab>(initialTab);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [adminData, setAdminData] = useState<any>(null);
@@ -63,14 +82,61 @@ function AdminDashboardContent({
   const [pricingForm, setPricingForm] = useState(DEFAULT_PRICING);
   const [brandingForm, setBrandingForm] = useState(DEFAULT_BRANDING);
   const [isSimulating, setIsSimulating] = useState(false);
+  const [testingPrinterId, setTestingPrinterId] = useState<string | null>(null);
+
+  // Payment Gateway Form State
+  const [paymentConfigForm, setPaymentConfigForm] = useState({
+    mode: 'TEST',
+    razorpay_key_id: '',
+    razorpay_key_secret: '',
+    webhook_secret: '',
+    status: 'NOT_CONFIGURED',
+    verified_at: null as string | null,
+  });
+  const [showKeySecret, setShowKeySecret] = useState(false);
+  const [showWebhookSecret, setShowWebhookSecret] = useState(false);
+  const [isTestingPaymentConn, setIsTestingPaymentConn] = useState(false);
+  const [isSavingPaymentConfig, setIsSavingPaymentConfig] = useState(false);
+  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
+
+  const getAuthHeaders = async (): Promise<Record<string, string>> => {
+    try {
+      const user = auth.currentUser;
+      if (user) {
+        const token = await user.getIdToken();
+        return { Authorization: `Bearer ${token}` };
+      }
+      if (typeof window !== 'undefined') {
+        const stored = localStorage.getItem('smartprint_admin_token');
+        if (stored) return { Authorization: `Bearer ${stored}` };
+      }
+    } catch (e) {
+      console.warn('Failed to get Firebase token:', e);
+    }
+    return {};
+  };
 
   const fetchAdminData = async () => {
     try {
-      const res = await fetch('/api/admin/data');
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('/api/admin/data', {
+        headers: { ...authHeaders },
+      });
       const data = await res.json();
-      setAdminData(data);
-      if (data.pricing) setPricingForm(data.pricing);
-      if (data.branding) setBrandingForm(data.branding);
+      if (res.ok && data) {
+        setAdminData(data);
+        if (data.pricing) setPricingForm(data.pricing);
+        if (data.branding) setBrandingForm(data.branding);
+        if (data.payment_config) {
+          setPaymentConfigForm((prev) => ({
+            ...prev,
+            mode: data.payment_config.mode || 'TEST',
+            razorpay_key_id: data.payment_config.razorpay_key_id || '',
+            status: data.payment_config.status || 'NOT_CONFIGURED',
+            verified_at: data.payment_config.verified_at || null,
+          }));
+        }
+      }
     } catch (err) {
       console.error('Failed to load admin data:', err);
     } finally {
@@ -93,14 +159,21 @@ function AdminDashboardContent({
   const handleSavePricing = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch('/api/pricing', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
         body: JSON.stringify(pricingForm),
       });
       if (res.ok) {
         showToast('Pricing configuration updated successfully!');
         fetchAdminData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || 'Failed to update pricing', 'error');
       }
     } catch (err) {
       showToast('Error updating pricing', 'error');
@@ -111,17 +184,94 @@ function AdminDashboardContent({
   const handleSaveBranding = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch('/api/branding', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
         body: JSON.stringify(brandingForm),
       });
       if (res.ok) {
         showToast('Branding settings updated successfully!');
         fetchAdminData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || 'Failed to update branding', 'error');
       }
     } catch (err) {
       showToast('Error updating branding', 'error');
+    }
+  };
+
+  // Save Payment Configuration
+  const handleSavePaymentConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingPaymentConfig(true);
+    try {
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('/api/admin/payment-config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: JSON.stringify(paymentConfigForm),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast('Razorpay Payment Gateway settings saved!');
+        if (data.config) {
+          setPaymentConfigForm((prev) => ({
+            ...prev,
+            status: data.config.status,
+            verified_at: data.config.verified_at,
+          }));
+        }
+        fetchAdminData();
+      } else {
+        showToast(data.error || 'Failed to save Payment Gateway settings', 'error');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Error saving payment gateway config', 'error');
+    } finally {
+      setIsSavingPaymentConfig(false);
+    }
+  };
+
+  // Test Payment Connection
+  const handleTestPaymentConnection = async () => {
+    setIsTestingPaymentConn(true);
+    try {
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('/api/admin/payment-config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: JSON.stringify({
+          ...paymentConfigForm,
+          test_connection: true,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.config?.status === 'CONFIGURED') {
+        showToast('Razorpay credentials verified successfully! Connection active.');
+        setPaymentConfigForm((prev) => ({
+          ...prev,
+          status: data.config.status,
+          verified_at: data.config.verified_at,
+        }));
+        fetchAdminData();
+      } else {
+        showToast(data.error || 'Razorpay verification failed. Ensure valid Key ID and Secret.', 'error');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Error testing Razorpay connection', 'error');
+    } finally {
+      setIsTestingPaymentConn(false);
     }
   };
 
@@ -129,9 +279,13 @@ function AdminDashboardContent({
   const handleTriggerSimulation = async (action: string, payload: any = {}) => {
     setIsSimulating(true);
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch('/api/admin/simulate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
         body: JSON.stringify({ action, ...payload }),
       });
       const data = await res.json();
@@ -148,12 +302,44 @@ function AdminDashboardContent({
     }
   };
 
+  // Dispatch real test print
+  const handleTestPrint = async (printer: any) => {
+    setTestingPrinterId(printer.id);
+    try {
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('/api/admin/test-print', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: JSON.stringify({ printer_id: printer.id, kiosk_id: printer.kiosk_id }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(`Test print dispatched to ${printer.cups_queue_name}! (Job: ${data.test_print_id})`);
+        fetchAdminData();
+      } else {
+        showToast(data.error || 'Failed to dispatch test print', 'error');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Test print request error', 'error');
+    } finally {
+      setTestingPrinterId(null);
+    }
+  };
+
   // Toggle Kiosk Maintenance Mode
   const handleToggleMaintenance = async (kioskId: string, currentVal: boolean) => {
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch('/api/kiosk/heartbeat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-kiosk-id': kioskId },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-kiosk-id': kioskId,
+          ...authHeaders,
+        },
         body: JSON.stringify({ maintenance_mode: !currentVal }),
       });
       if (res.ok) {
@@ -250,6 +436,7 @@ function AdminDashboardContent({
               { id: 'routing', label: 'Printer Routing', icon: Sliders },
               { id: 'jobs', label: 'Print Jobs & Queue', icon: FileText },
               { id: 'payments', label: 'Payments & Revenue', icon: CreditCard },
+              { id: 'payment_gateway', label: 'Payment Gateway', icon: KeyRound },
               { id: 'pricing', label: 'Pricing Engine', icon: Tag },
               { id: 'branding', label: 'Branding Manager', icon: Palette },
               { id: 'telemetry', label: 'Telemetry & Simulation', icon: Activity },
@@ -601,10 +788,12 @@ function AdminDashboardContent({
                         Last Print: {new Date(printer.last_test_print || Date.now()).toLocaleTimeString()}
                       </span>
                       <button
-                        onClick={() => showToast(`Sent test print page to ${printer.cups_queue_name}`)}
-                        className="px-3 py-1 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg transition-colors"
+                        onClick={() => handleTestPrint(printer)}
+                        disabled={testingPrinterId === printer.id}
+                        className="px-3 py-1 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5"
                       >
-                        Print Test Page
+                        {testingPrinterId === printer.id && <RefreshCw className="w-3 h-3 animate-spin text-blue-400" />}
+                        <span>{testingPrinterId === printer.id ? 'Dispatching...' : 'Print Test Page'}</span>
                       </button>
                     </div>
                   </div>
@@ -640,9 +829,13 @@ function AdminDashboardContent({
 
                   const handleSaveRoute = async (updatedFields: any) => {
                     try {
+                      const authHeaders = await getAuthHeaders();
                       const res = await fetch('/api/admin/routing', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: {
+                          'Content-Type': 'application/json',
+                          ...authHeaders,
+                        },
                         body: JSON.stringify({ kiosk_id: kiosk.id, ...currentRoute, ...updatedFields }),
                       });
                       const resData = await res.json();
@@ -903,6 +1096,246 @@ function AdminDashboardContent({
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5.5: PAYMENT GATEWAY (RAZORPAY) */}
+          {activeTab === 'payment_gateway' && (
+            <div className="space-y-6 max-w-4xl">
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-5">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                      <KeyRound className="w-5 h-5 text-blue-600" />
+                      <span>Payment Gateway (Razorpay) Settings</span>
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Configure organization-level API credentials and webhook secrets for student UPI payments
+                    </p>
+                  </div>
+
+                  <div>
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
+                        paymentConfigForm.status === 'CONFIGURED'
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                          : paymentConfigForm.status === 'PENDING_VERIFICATION'
+                          ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                          : paymentConfigForm.status === 'VERIFICATION_FAILED'
+                          ? 'bg-red-100 text-red-800 border border-red-300'
+                          : 'bg-slate-100 text-slate-700 border border-slate-300'
+                      }`}
+                    >
+                      {paymentConfigForm.status === 'CONFIGURED' ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                      )}
+                      <span>
+                        {paymentConfigForm.status === 'CONFIGURED'
+                          ? 'GATEWAY ACTIVE & VERIFIED'
+                          : paymentConfigForm.status === 'VERIFICATION_FAILED'
+                          ? 'VERIFICATION FAILED'
+                          : 'NOT CONFIGURED'}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Tenant Isolation Banner */}
+                <div className="p-4 bg-blue-50/70 border border-blue-200/80 rounded-xl flex items-start gap-3">
+                  <ShieldCheck className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                  <div className="text-xs space-y-1">
+                    <span className="font-bold text-blue-950 block">
+                      Multi-Tenant Isolation Enforced ({brandingForm.organization})
+                    </span>
+                    <p className="text-blue-800">
+                      These Razorpay credentials are bound exclusively to this organization. Revenue from student print orders at your kiosks settles directly into your designated Razorpay merchant account.
+                    </p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleSavePaymentConfig} className="space-y-5 text-xs">
+                  {/* Mode Selector */}
+                  <div>
+                    <label className="block font-bold text-slate-800 mb-2">
+                      Gateway Operational Environment
+                    </label>
+                    <div className="grid grid-cols-2 gap-3 max-w-md">
+                      <button
+                        type="button"
+                        onClick={() => setPaymentConfigForm({ ...paymentConfigForm, mode: 'TEST' })}
+                        className={`p-3 rounded-xl border text-left flex items-center justify-between transition-all ${
+                          paymentConfigForm.mode === 'TEST'
+                            ? 'border-amber-500 bg-amber-50/60 shadow-xs'
+                            : 'border-slate-200 hover:border-slate-300 bg-white'
+                        }`}
+                      >
+                        <div>
+                          <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-amber-500" />
+                            <span>Test Mode</span>
+                          </div>
+                          <span className="text-[10px] text-slate-500">rzp_test_... (Sandbox)</span>
+                        </div>
+                        {paymentConfigForm.mode === 'TEST' && <Check className="w-4 h-4 text-amber-600" />}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setPaymentConfigForm({ ...paymentConfigForm, mode: 'LIVE' })}
+                        className={`p-3 rounded-xl border text-left flex items-center justify-between transition-all ${
+                          paymentConfigForm.mode === 'LIVE'
+                            ? 'border-emerald-500 bg-emerald-50/60 shadow-xs'
+                            : 'border-slate-200 hover:border-slate-300 bg-white'
+                        }`}
+                      >
+                        <div>
+                          <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                            <span>Live Production</span>
+                          </div>
+                          <span className="text-[10px] text-slate-500">rzp_live_... (Real UPI)</span>
+                        </div>
+                        {paymentConfigForm.mode === 'LIVE' && <Check className="w-4 h-4 text-emerald-600" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Razorpay Key ID */}
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Razorpay Key ID <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder={paymentConfigForm.mode === 'LIVE' ? 'rzp_live_xxxxxxxxxxxx' : 'rzp_test_xxxxxxxxxxxx'}
+                      value={paymentConfigForm.razorpay_key_id}
+                      onChange={(e) => setPaymentConfigForm({ ...paymentConfigForm, razorpay_key_id: e.target.value.trim() })}
+                      className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl font-mono text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-1 block">
+                      Found in Razorpay Dashboard &rarr; Settings &rarr; API Keys.
+                    </span>
+                  </div>
+
+                  {/* Razorpay Key Secret */}
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Razorpay Key Secret <span className="text-red-500">*</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showKeySecret ? 'text' : 'password'}
+                        placeholder={paymentConfigForm.status === 'CONFIGURED' ? '•••••••••••••••• (Leave blank to keep existing)' : 'Enter Razorpay Key Secret'}
+                        value={paymentConfigForm.razorpay_key_secret}
+                        onChange={(e) => setPaymentConfigForm({ ...paymentConfigForm, razorpay_key_secret: e.target.value })}
+                        className="w-full px-3.5 py-2.5 pr-10 border border-slate-300 rounded-xl font-mono text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowKeySecret(!showKeySecret)}
+                        className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600"
+                      >
+                        {showKeySecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <span className="text-[10px] text-slate-400 mt-1 block">
+                      Secrets are securely stored and masked. Never revealed to client-side browsers.
+                    </span>
+                  </div>
+
+                  {/* Webhook Secret */}
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Webhook Secret (HMAC-SHA256)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showWebhookSecret ? 'text' : 'password'}
+                        placeholder={paymentConfigForm.status === 'CONFIGURED' ? '•••••••••••••••• (Leave blank to keep existing)' : 'Enter Webhook Secret'}
+                        value={paymentConfigForm.webhook_secret}
+                        onChange={(e) => setPaymentConfigForm({ ...paymentConfigForm, webhook_secret: e.target.value })}
+                        className="w-full px-3.5 py-2.5 pr-10 border border-slate-300 rounded-xl font-mono text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowWebhookSecret(!showWebhookSecret)}
+                        className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600"
+                      >
+                        {showWebhookSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <span className="text-[10px] text-slate-400 mt-1 block">
+                      Used to cryptographically verify incoming Razorpay webhook payment notifications.
+                    </span>
+                  </div>
+
+                  {/* Webhook Endpoint URL */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                    <span className="font-bold text-slate-700 block">
+                      Your Organization Webhook URL for Razorpay Dashboard:
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 bg-white border border-slate-200 px-3 py-1.5 rounded-lg text-slate-800 font-mono text-[11px] truncate select-all">
+                        {typeof window !== 'undefined'
+                          ? `${window.location.origin}/api/webhooks/razorpay`
+                          : 'https://smart-print-sandy.vercel.app/api/webhooks/razorpay'}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const url =
+                            typeof window !== 'undefined'
+                              ? `${window.location.origin}/api/webhooks/razorpay`
+                              : 'https://smart-print-sandy.vercel.app/api/webhooks/razorpay';
+                          navigator.clipboard.writeText(url);
+                          setCopiedWebhookUrl(true);
+                          setTimeout(() => setCopiedWebhookUrl(false), 2500);
+                        }}
+                        className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors"
+                      >
+                        {copiedWebhookUrl ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedWebhookUrl ? 'Copied!' : 'Copy'}</span>
+                      </button>
+                    </div>
+                    <span className="text-[10px] text-slate-500 block">
+                      Subscribe to events: <strong className="text-slate-700 font-mono">order.paid</strong>, <strong className="text-slate-700 font-mono">payment.captured</strong>, <strong className="text-slate-700 font-mono">payment.failed</strong>
+                    </span>
+                  </div>
+
+                  {/* Validation Timestamp */}
+                  {paymentConfigForm.verified_at && (
+                    <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Last successfully verified: {new Date(paymentConfigForm.verified_at).toLocaleString()}</span>
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={handleTestPaymentConnection}
+                      disabled={isTestingPaymentConn || !paymentConfigForm.razorpay_key_id}
+                      className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-800 font-bold rounded-xl flex items-center gap-2 border border-slate-300 transition-colors"
+                    >
+                      {isTestingPaymentConn ? <RefreshCw className="w-4 h-4 animate-spin text-blue-600" /> : <Zap className="w-4 h-4 text-amber-500" />}
+                      <span>{isTestingPaymentConn ? 'Verifying...' : 'Test Connection'}</span>
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={isSavingPaymentConfig}
+                      className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl flex items-center gap-2 shadow-md shadow-blue-600/30 transition-colors"
+                    >
+                      {isSavingPaymentConfig ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                      <span>{isSavingPaymentConfig ? 'Saving...' : 'Save Gateway Settings'}</span>
+                    </button>
+                  </div>
+                </form>
               </div>
             </div>
           )}
@@ -1241,7 +1674,7 @@ function AdminDashboardContent({
 export default function AdminPanelPage({
   initialTab,
 }: {
-  initialTab?: 'dashboard' | 'kiosks' | 'printers' | 'routing' | 'jobs' | 'payments' | 'pricing' | 'branding' | 'telemetry' | 'audit' | 'settings';
+  initialTab?: AdminTab;
 }) {
   return (
     <AdminAuthGuard>

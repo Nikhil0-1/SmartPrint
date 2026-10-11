@@ -8,7 +8,7 @@
 
 import { supabaseAdmin, isSupabaseConfigured } from '@/lib/supabase';
 
-export const TEMPORARY_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'smartprint-temporary';
+export const TEMPORARY_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'print-temp';
 
 export interface TemporaryUploadParams {
   organizationId: string;

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
+import { authenticateRequest } from '@/lib/auth';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -21,9 +22,18 @@ export async function GET(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    const auth = await authenticateRequest(request);
+    if (!auth.authenticated || !auth.user) {
+      return NextResponse.json({ error: auth.error || 'Authentication required' }, { status: auth.status });
+    }
+
     const body = await request.json();
-    const adminEmail = request.headers.get('x-admin-email') || 'admin@gitam.edu';
-    const orgId = body.organization_id || GITAM_ORG_ID;
+    const adminEmail = auth.user.email;
+    const orgId = body.organization_id || auth.user.authorizedOrganizationIds[0] || GITAM_ORG_ID;
+
+    if (!auth.user.isSuperAdmin && !auth.user.authorizedOrganizationIds.includes(orgId)) {
+      return NextResponse.json({ error: 'Access denied to update pricing for this organization' }, { status: 403 });
+    }
 
     const updated = store.updatePricing(orgId, body, adminEmail);
     return NextResponse.json({ success: true, pricing: updated });

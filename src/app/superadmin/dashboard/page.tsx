@@ -70,8 +70,19 @@ export default function SuperAdminDashboardPage() {
       try {
         return await firebaseUser.getIdToken(false);
       } catch {
-        return null;
+        // fallback
       }
+    }
+    if (auth.currentUser) {
+      try {
+        return await auth.currentUser.getIdToken(false);
+      } catch {
+        // fallback
+      }
+    }
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('smartprint_admin_token');
+      if (stored) return stored;
     }
     return null;
   }, [firebaseUser]);
@@ -191,14 +202,25 @@ export default function SuperAdminDashboardPage() {
 
   const handleCreateAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmittingAdmin(true);
+    if (!adminDisplayName.trim()) {
+      showToast('Please enter the administrator full name.', 'error');
+      setIsSubmittingAdmin(false);
+      return;
+    }
+    if (!adminEmail.trim() || !adminEmail.includes('@') || !adminEmail.includes('.')) {
+      showToast('Please enter a valid email address (e.g. name@gitam.edu).', 'error');
+      setIsSubmittingAdmin(false);
+      return;
+    }
+
     try {
       const token = await getAuthToken();
       if (!token) {
-        showToast('Authentication required', 'error');
+        showToast('Authentication required. Please re-login.', 'error');
         setIsSubmittingAdmin(false);
         return;
       }
+      const targetOrg = adminOrgId || organizations[0]?.id || '00000000-0000-0000-0000-000000000001';
       const res = await fetch('/api/admin/create-admin', {
         method: 'POST',
         headers: {
@@ -206,10 +228,10 @@ export default function SuperAdminDashboardPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          display_name: adminDisplayName,
-          email: adminEmail,
-          organization_id: adminOrgId || (organizations[0]?.id || ''),
-          contact_number: adminContact,
+          display_name: adminDisplayName.trim(),
+          email: adminEmail.trim(),
+          organization_id: targetOrg,
+          contact_number: adminContact.trim(),
         }),
       });
       const data = await res.json();

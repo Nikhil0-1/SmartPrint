@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
 import { requireSuperAdmin } from '@/lib/auth';
 import { createAdminUserInFirebase, generateTemporarySecurePassword } from '@/lib/firebaseAdmin';
+import { supabaseAdmin, isSupabaseConfigured } from '@/lib/supabase';
 
 export async function POST(request: Request) {
   try {
@@ -81,6 +82,22 @@ export async function POST(request: Request) {
       role: 'ORG_ADMIN',
       status: 'ACTIVE',
     }, authResult.user.email);
+
+    // 7b. Persist to Supabase PostgreSQL table
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseAdmin.from('organization_members').upsert({
+          organization_id,
+          firebase_uid: firebaseUser?.uid || `fb_uid_${Date.now()}`,
+          email: cleanEmail,
+          full_name: display_name,
+          role: 'ORG_ADMIN',
+          status: 'ACTIVE',
+        }, { onConflict: 'email' });
+      } catch (dbErr) {
+        console.warn('[SUPABASE] Failed to persist organization member:', dbErr);
+      }
+    }
 
     // 8. Record in Multi-Tenant Audit Log
     store.logAudit(
