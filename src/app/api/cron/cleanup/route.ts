@@ -5,6 +5,8 @@ import { permanentlyDeleteDocument } from '@/lib/fileSecurity';
 import { supabaseAdmin } from '@/lib/supabase';
 import { dbWriteSystemLog } from '@/lib/db';
 
+export const maxDuration = 30;
+
 export async function POST(request: Request) {
   try {
     const authHeader = request.headers.get('authorization') || '';
@@ -22,108 +24,88 @@ export async function POST(request: Request) {
     }
 
     const now = Date.now();
-    let purgedFilesCount = 0;
-    let expiredSessionsCount = 0;
-    let purgedJobsCount = 0;
-    let dbExpiredCount = 0;
-
-    // ─── 1. Clean up store completed-job orphan files ────────────────────────
-    const completedJobs = store.getAllJobs().filter((j) => j.status === 'COMPLETED');
-    for (const job of completedJobs) {
-      const deleted = await permanentlyDeleteDocument(job.id);
-      if (deleted) {
-        purgedFilesCount += 1;
-      }
-    }
-
-    // ─── 2. Cancel abandoned unpaid jobs (store) ────────────────────────────
     const abandonedThreshold = now - 30 * 60 * 1000;
+    const dbAbandonedCutoff = new Date(abandonedThreshold).toISOString();
+    const heartbeatCutoff = new Date(now - 3 * 60 * 1000).toISOString();
+    const nowIso = new Date().toISOString();
+
+    // ─── Run Store & Cloud cleanups concurrently ────────────────────────────
+    const completedJobs = store.getAllJobs().filter((j) => j.status === 'COMPLETED');
     const unpaidJobs = store.getAllJobs().filter(
       (j) =>
         ['CREATED', 'UPLOAD_COMPLETE', 'PAYMENT_PENDING'].includes(j.status) &&
         new Date(j.created_at).getTime() < abandonedThreshold
     );
 
-    for (const job of unpaidJobs) {
-      await permanentlyDeleteDocument(job.id);
-      store.updateJobStatus(job.id, 'EXPIRED' as any, { error_message: 'Abandoned session expired before payment.' });
-      purgedJobsCount += 1;
+    // Parallel execution of file purges, DB status updates, and storage sweeping
+    const [
+      completedPurges,
+      unpaidPurges,
+      dbAbandonedResult,
+      leaseResetResult,
+      kioskHeartbeatResult,
+      storagePurgeResult,
+    ] = await Promise.all([
+      // 1. Purge store completed jobs
+      Promise.all(completedJobs.map((j) => permanentlyDeleteDocument(j.id))),
+      // 2. Cancel abandoned store jobs
+      Promise.all(
+        unpaidJobs.map(async (j) => {
+          await permanentlyDeleteDocument(j.id);
+          store.updateJobStatus(j.id, 'EXPIRED' as any, {
+            error_message: 'Abandoned session expired before payment.',
+          });
+          return true;
+        })
+      ),
+      // 3. Batch cancel abandoned DB jobs
+      supabaseAdmin
+        .from('print_jobs')
+        .update({
+          status: 'CANCELLED',
+          error_message: 'Abandoned session expired before payment',
+        })
+        .in('status', ['CREATED', 'UPLOAD_COMPLETE', 'PAYMENT_PENDING'])
+        .lt('created_at', dbAbandonedCutoff)
+        .select('id, file_storage_path'),
+      // 4. Batch reset stale leased jobs
+      supabaseAdmin
+        .from('print_jobs')
+        .update({
+          status: 'QUEUED',
+          worker_lease_id: null,
+          lease_expires_at: null,
+        })
+        .in('status', ['DISPATCHED', 'ACKNOWLEDGED'])
+        .lt('lease_expires_at', nowIso)
+        .select('id'),
+      // 5. Mark stale kiosks offline
+      supabaseAdmin
+        .from('kiosks')
+        .update({ status: 'OFFLINE', updated_at: nowIso })
+        .lt('last_heartbeat', heartbeatCutoff)
+        .neq('status', 'MAINTENANCE')
+        .neq('status', 'DISABLED'),
+      // 6. Storage sweep
+      storageService.deleteExpiredDocuments(900),
+    ]);
+
+    const purgedFilesCount = completedPurges.filter(Boolean).length;
+    const purgedJobsCount = unpaidPurges.length;
+    const dbExpiredCount = dbAbandonedResult.data?.length || 0;
+    const staleLeasesResetCount = leaseResetResult.data?.length || 0;
+
+    // Clean any remote files associated with abandoned DB jobs
+    if (dbAbandonedResult.data && dbAbandonedResult.data.length > 0) {
+      Promise.all(
+        dbAbandonedResult.data
+          .filter((j) => j.file_storage_path)
+          .map((j) => storageService.deleteTemporaryDocument(j.file_storage_path!))
+      ).catch(() => null);
     }
 
-    // ─── 3. Cancel abandoned unpaid jobs (DB) ───────────────────────────────
-    // Expire print_jobs stuck in pre-payment states for > 30 minutes
-    const dbAbandonedCutoff = new Date(now - 30 * 60 * 1000).toISOString();
-    const { data: dbAbandonedJobs, error: dbAbandonedErr } = await supabaseAdmin
-      .from('print_jobs')
-      .select('id, file_storage_path')
-      .in('status', ['CREATED', 'UPLOAD_COMPLETE', 'PAYMENT_PENDING'])
-      .lt('created_at', dbAbandonedCutoff);
-
-    if (!dbAbandonedErr && dbAbandonedJobs) {
-      for (const dbJob of dbAbandonedJobs) {
-        // Delete cloud file if path known
-        if (dbJob.file_storage_path) {
-          await storageService.deleteTemporaryDocument(dbJob.file_storage_path).catch(() => null);
-        }
-
-        await supabaseAdmin
-          .from('print_jobs')
-          .update({
-            status: 'CANCELLED',
-            error_message: 'Abandoned session expired before payment',
-          })
-          .eq('id', dbJob.id);
-
-        dbExpiredCount += 1;
-      }
-    }
-
-    // ─── 4. Release expired kiosk worker leases ──────────────────────────────
-    // Jobs stuck in DISPATCHED/ACKNOWLEDGED with expired leases go back to QUEUED for retry
-    const { data: staleLeasedJobs } = await supabaseAdmin
-      .from('print_jobs')
-      .select('id, retry_count, max_retries')
-      .in('status', ['DISPATCHED', 'ACKNOWLEDGED'])
-      .lt('lease_expires_at', new Date().toISOString());
-
-    if (staleLeasedJobs) {
-      for (const leaseJob of staleLeasedJobs) {
-        if (leaseJob.retry_count >= leaseJob.max_retries) {
-          await supabaseAdmin
-            .from('print_jobs')
-            .update({
-              status: 'RECOVERY_REQUIRED',
-              error_message: `Max retries (${leaseJob.max_retries}) exceeded after lease expiry`,
-            })
-            .eq('id', leaseJob.id);
-        } else {
-          // Reclaim — reset to QUEUED for the next worker
-          await supabaseAdmin
-            .from('print_jobs')
-            .update({
-              status: 'QUEUED',
-              worker_lease_id: null,
-              lease_expires_at: null,
-            })
-            .eq('id', leaseJob.id);
-        }
-      }
-    }
-
-    // ─── 5. Mark kiosks offline if heartbeat is stale ────────────────────────
-    const heartbeatCutoff = new Date(now - 3 * 60 * 1000).toISOString();
-    await supabaseAdmin
-      .from('kiosks')
-      .update({ status: 'OFFLINE', updated_at: new Date().toISOString() })
-      .lt('last_heartbeat', heartbeatCutoff)
-      .neq('status', 'MAINTENANCE')
-      .neq('status', 'DISABLED');
-
-    // ─── 6. Batch purge expired storage objects via storage abstraction ───────
-    const storagePurgeResult = await storageService.deleteExpiredDocuments(900); // older than 15 min
-
-    // ─── 7. Audit log ─────────────────────────────────────────────────────────
-    await dbWriteSystemLog({
+    // ─── 7. Log asynchronously without blocking response ───────────────────
+    void dbWriteSystemLog({
       level: 'INFO',
       component: 'CLEANUP',
       message: 'Automated Zero-Retention cleanup cycle completed.',
@@ -132,7 +114,7 @@ export async function POST(request: Request) {
         expired_abandoned_store_jobs: purgedJobsCount,
         expired_abandoned_db_jobs: dbExpiredCount,
         storage_objects_purged: storagePurgeResult.count,
-        stale_leased_jobs_reset: staleLeasedJobs?.length || 0,
+        stale_leased_jobs_reset: staleLeasesResetCount,
       },
     });
 
@@ -144,11 +126,11 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      timestamp: new Date().toISOString(),
+      timestamp: nowIso,
       purged_completed_files: purgedFilesCount,
       expired_unpaid_jobs_store: purgedJobsCount,
       expired_unpaid_jobs_db: dbExpiredCount,
-      stale_leases_reset: staleLeasedJobs?.length || 0,
+      stale_leases_reset: staleLeasesResetCount,
       storage_objects_purged: storagePurgeResult.count,
       status: 'CLEANUP_SUCCESS',
     });
