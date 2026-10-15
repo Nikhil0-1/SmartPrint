@@ -117,6 +117,9 @@ CREATE INDEX IF NOT EXISTS idx_print_jobs_kiosk_status
 -- ─── 8. REPLACE claim_next_print_job WITH CANONICAL VERSION ──────────────────
 -- This version correctly handles both printer-specific and kiosk-wide claiming.
 -- It also resolves stale leases (DISPATCHED / ACKNOWLEDGED with expired lease).
+-- DROP first because PostgreSQL disallows changing a function's return type
+-- via CREATE OR REPLACE — the column set here differs from 005_fifo_print_queue.sql.
+DROP FUNCTION IF EXISTS claim_next_print_job(VARCHAR, VARCHAR, INTEGER, UUID);
 CREATE OR REPLACE FUNCTION claim_next_print_job(
     p_kiosk_id       VARCHAR,
     p_worker_id      VARCHAR,
