@@ -1,64 +1,86 @@
 import { NextResponse } from 'next/server';
-import { store, GITAM_ORG_ID } from '@/lib/store';
-import { verifyWebhookSignature } from '@/lib/razorpay';
+import { GITAM_ORG_ID, store } from '@/lib/store';
+import { verifyWebhookSignatureFromDb } from '@/lib/razorpay';
+import {
+  dbHasWebhookEvent,
+  dbRecordWebhookEvent,
+  dbGetPaymentOrder,
+  dbUpdatePrintJobStatus,
+  dbGetPrintJob,
+  dbEnqueuePrintJob,
+  dbWriteSystemLog,
+  dbRecordPaymentTransaction,
+} from '@/lib/db';
 
 export async function POST(request: Request) {
   try {
     const rawBody = await request.text();
     const signature = request.headers.get('x-razorpay-signature') || '';
 
-    let payload: any;
+    let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(rawBody);
     } catch {
       return NextResponse.json({ error: 'Invalid JSON payload' }, { status: 400 });
     }
 
-    const eventId = payload.event_id || payload.id || `${payload.event}_${Date.now()}`;
-    const event = payload.event;
+    const eventId =
+      (payload.event_id as string) ||
+      (payload.id as string) ||
+      `${payload.event}_${Date.now()}`;
+    const event = payload.event as string;
 
-    // Idempotency: Reject duplicate webhook event delivery
-    if (eventId && store.hasWebhookEvent(eventId)) {
-      store.logSystem('INFO', 'WEBHOOK', `Duplicate webhook event ${eventId} safely ignored.`);
+    // Idempotency: check in-memory store AND persistent DB
+    const isDuplicate = store.hasWebhookEvent(eventId) || (await dbHasWebhookEvent(eventId));
+    if (isDuplicate) {
+      await dbWriteSystemLog({
+        level: 'INFO',
+        component: 'WEBHOOK',
+        message: `Duplicate webhook event ${eventId} safely ignored.`,
+      });
       return NextResponse.json({ status: 'ignored_duplicate', event_id: eventId });
     }
 
     // Resolve order and payment entities
-    const paymentEntity = payload.payload?.payment?.entity;
-    const orderEntity = payload.payload?.order?.entity;
-    const orderId = paymentEntity?.order_id || orderEntity?.id;
-    const paymentId = paymentEntity?.id;
-    const amountPaise: number = paymentEntity?.amount || 0;
+    const payloadObj = payload.payload as Record<string, unknown> | undefined;
+    const paymentEntity = (payloadObj?.payment as Record<string, unknown>)?.entity as
+      | Record<string, unknown>
+      | undefined;
+    const orderEntity = (payloadObj?.order as Record<string, unknown>)?.entity as
+      | Record<string, unknown>
+      | undefined;
+    const orderId = (paymentEntity?.order_id as string) || (orderEntity?.id as string);
+    const paymentId = paymentEntity?.id as string | undefined;
+    const amountPaise: number = (paymentEntity?.amount as number) || 0;
 
-    // Resolve organization ID from registered order or payload notes
+    // Resolve organization ID from registered order in the database
     let organizationId = GITAM_ORG_ID;
     if (orderId) {
-      const orderRecord = store.getPaymentOrder(orderId);
+      const orderRecord = await dbGetPaymentOrder(orderId);
       if (orderRecord?.organization_id) {
-        organizationId = orderRecord.organization_id;
+        organizationId = orderRecord.organization_id as string;
       }
     }
-    if (!organizationId && paymentEntity?.notes?.organization_id) {
-      organizationId = paymentEntity.notes.organization_id;
+    const notes = paymentEntity?.notes as Record<string, string> | undefined;
+    if (!organizationId && notes?.organization_id) {
+      organizationId = notes.organization_id;
     }
 
-    // Webhook Signature Verification against organization's specific webhook secret
-    const config = store.getPaymentConfig(organizationId);
-    if (config?.webhook_secret && !config.webhook_secret.includes('placeholder')) {
-      const isValid = verifyWebhookSignature(rawBody, signature, organizationId);
-      if (!isValid) {
-        store.logSystem(
-          'CRITICAL',
-          'WEBHOOK',
-          `Tampered or invalid Razorpay webhook signature for org ${organizationId}`,
-          { signature_header: signature ? signature.slice(0, 8) + '...' : 'none' }
-        );
-        return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 400 });
-      }
+    // Webhook Signature Verification using the organization's webhook secret from DB
+    const isValid = await verifyWebhookSignatureFromDb(rawBody, signature, organizationId);
+    if (!isValid) {
+      await dbWriteSystemLog({
+        level: 'CRITICAL',
+        component: 'WEBHOOK',
+        message: `Tampered or invalid Razorpay webhook signature for org ${organizationId}`,
+        metadata: { signature_header: signature ? signature.slice(0, 8) + '...' : 'none' },
+      });
+      return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 400 });
     }
 
     // Record webhook event for persistent idempotency
     store.recordWebhookEvent(eventId, organizationId, event, payload);
+    await dbRecordWebhookEvent(eventId, organizationId, event, payload);
 
     // Process payment events
     if (event === 'order.paid' || event === 'payment.captured') {
@@ -66,33 +88,56 @@ export async function POST(request: Request) {
         return NextResponse.json({ status: 'ok_no_ids', event });
       }
 
-      const payment = store.verifyPayment(orderId, paymentId, signature, organizationId);
-      if (payment) {
-        const job = store.getJob(payment.job_id);
+      // Lookup order record to find the associated job
+      const orderRecord = await dbGetPaymentOrder(orderId);
+      if (orderRecord) {
+        const jobId = orderRecord.job_id as string;
+
+        // Record the payment transaction
+        await dbRecordPaymentTransaction({
+          job_id: jobId,
+          organization_id: organizationId,
+          razorpay_order_id: orderId,
+          razorpay_payment_id: paymentId,
+          amount_paise: amountPaise,
+          raw_payload: payload,
+        });
+
+        // Transition print job to QUEUED in FIFO order so it can be picked up by the Pi agent
+        const job = await dbGetPrintJob(jobId);
         if (job) {
-          store.updateJobStatus(job.id, 'QUEUED');
+          await dbEnqueuePrintJob(jobId, job.printer_id || undefined);
         }
-        store.logSystem(
-          'INFO',
-          'WEBHOOK',
-          `PAYMENT AUTHORIZED: Order ${orderId} verified. Amount: ₹${(amountPaise / 100).toFixed(2)}. Print authorized.`,
-          { order_id: orderId, payment_id: paymentId, organization_id: organizationId }
-        );
+
+        await dbWriteSystemLog({
+          level: 'INFO',
+          component: 'WEBHOOK',
+          message: `PAYMENT AUTHORIZED: Order ${orderId} verified. Amount: ₹${(amountPaise / 100).toFixed(2)}. Print authorized.`,
+          metadata: {
+            order_id: orderId,
+            payment_id: paymentId,
+            organization_id: organizationId,
+          },
+        });
       }
     } else if (event === 'payment.failed') {
       if (orderId) {
-        const payment = store.getPayments().find((p) => p.razorpay_order_id === orderId);
-        if (payment) {
-          payment.status = 'FAILED';
-          const job = store.getJob(payment.job_id);
-          if (job) store.updateJobStatus(job.id, 'FAILED', { error_message: 'Payment failed at gateway' });
+        const orderRecord = await dbGetPaymentOrder(orderId);
+        if (orderRecord) {
+          const jobId = orderRecord.job_id as string;
+          await dbUpdatePrintJobStatus(jobId, 'PAYMENT_FAILED', 'Payment failed at gateway');
         }
       }
     }
 
     return NextResponse.json({ status: 'ok', event, event_id: eventId });
   } catch (error) {
-    store.logSystem('ERROR', 'WEBHOOK', `Webhook processing error: ${(error as Error).message}`);
+    console.error('[WEBHOOK ERROR]:', error);
+    await dbWriteSystemLog({
+      level: 'ERROR',
+      component: 'WEBHOOK',
+      message: `Webhook processing error: ${(error as Error).message}`,
+    });
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }

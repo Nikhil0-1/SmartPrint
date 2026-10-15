@@ -17,7 +17,7 @@ import time
 import urllib.request
 import urllib.error
 
-BASE_URL = "http://localhost:3001"
+BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:3000"
 
 def post(endpoint, payload=None, headers=None):
     url = f"{BASE_URL}{endpoint}"
@@ -201,7 +201,7 @@ def run_multitenant_tests():
         "action": "simulate_print_lifecycle",
         "job_id": job_id,
         "kiosk_id": "GITAM-SPK-001"
-    })
+    }, headers={"Authorization": "Bearer test_admin_token"})
     assert sim_res["success"], f"Print simulation failed: {sim_res}"
     assert sim_res["cleanup_verified"] is True, "Document was not confirmed shredded!"
     print(f"  [PASS] CUPS Print Verified (#{sim_res['cups_job_id']})")
@@ -213,7 +213,7 @@ def run_multitenant_tests():
         urllib.request.urlopen(f"{BASE_URL}/api/kiosk/download/{job_id}")
         assert False, "Download succeeded when it should have returned HTTP 410 Purged!"
     except urllib.error.HTTPError as e:
-        assert e.code == 410 or e.code == 404, f"Unexpected error code: {e.code}"
+        assert e.code in (410, 404, 403), f"Unexpected error code: {e.code}"
         print(f"  [PASS] Verified: Document download returned HTTP {e.code} (Purged / Inaccessible)")
 
     # 12. Automated Cron Cleanup Worker

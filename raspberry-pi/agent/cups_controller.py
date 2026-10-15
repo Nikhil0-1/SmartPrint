@@ -22,8 +22,8 @@ except ImportError:
 
 
 class CupsController:
-    def __init__(self, default_queue="HP_LaserJet_USB"):
-        self.default_queue = default_queue
+    def __init__(self, default_queue=None):
+        self.default_queue = default_queue or os.getenv("SMARTPRINT_CUPS_QUEUE", "Pantum_M7108DW")
         if HAS_PYCUPS:
             try:
                 self.conn = cups.Connection()
@@ -41,14 +41,19 @@ class CupsController:
             # Check USB bus devices
             usb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
             hp_found = "Hewlett-Packard" in usb_out or "HP" in usb_out
+            pantum_found = "Pantum" in usb_out or "2327:" in usb_out
             
             # Check CUPS detected devices
             lpinfo_out = subprocess.check_output(["lpinfo", "-v"], text=True, stderr=subprocess.DEVNULL)
             for line in lpinfo_out.splitlines():
                 if "usb://" in line:
+                    uri = line.split()[-1]
+                    mfg = "Pantum" if ("pantum" in uri.lower() or pantum_found) else ("HP" if hp_found else "Generic USB")
                     printers.append({
-                        "uri": line.split()[-1],
+                        "uri": uri,
                         "connection": "USB",
+                        "manufacturer": mfg,
+                        "pantum_hardware_detected": pantum_found,
                         "hp_hardware_detected": hp_found
                     })
         except Exception as e:
@@ -77,6 +82,8 @@ class CupsController:
                         if "media-empty" in reason_str:
                             return "PAPER_OUT", "Paper tray is empty"
                         return "ERROR", f"Printer error: {reason_str}"
+                else:
+                    return "OFFLINE", f"Queue '{target_queue}' not configured in CUPS"
             except Exception as e:
                 logging.error(f"pycups status check failed: {e}")
 
@@ -95,9 +102,9 @@ class CupsController:
                 return "OFFLINE", f"Queue '{target_queue}' not found in CUPS"
             return "ERROR", e.output.strip()
         except Exception as e:
-            return "UNKNOWN", str(e)
+            return "OFFLINE", f"CUPS service unavailable: {e}"
 
-        return "READY", "Operational"
+        return "OFFLINE", f"No verified status available for queue '{target_queue}'"
 
     def submit_print_job(self, file_path, options, queue_name=None):
         """

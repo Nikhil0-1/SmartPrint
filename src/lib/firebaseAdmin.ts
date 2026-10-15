@@ -63,38 +63,13 @@ export async function verifyFirebaseAdminIdToken(
       };
     }
   } catch (e) {
-    console.warn('[FIREBASE ADMIN] Cryptographic token verification failed, using token payload fallback:', e);
+    // Cryptographic verification failed. Do NOT fall back to unverified decode.
+    // This prevents forged tokens from gaining access if the SDK is misconfigured.
+    console.error('[FIREBASE ADMIN] Cryptographic token verification failed:', (e as Error).message);
   }
 
-  // Graceful fallback for local development & production when service account is not yet supplied:
-  // Decodes JWT, validates exp claim, structure, and extracts email/uid
-  try {
-    const parts = cleanToken.split('.');
-    if (parts.length === 3) {
-      const payloadBase64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-      const payloadJson = Buffer.from(payloadBase64, 'base64').toString('utf8');
-      const payload = JSON.parse(payloadJson);
-
-      const nowSec = Math.floor(Date.now() / 1000);
-      if (payload.exp && payload.exp < nowSec) {
-        console.warn('[FIREBASE AUTH WARNING] Token has expired.');
-        return null;
-      }
-
-      const uid = payload.user_id || payload.sub || payload.uid;
-      const email = payload.email || '';
-      if (uid) {
-        return {
-          uid,
-          email,
-          customClaims: payload,
-        };
-      }
-    }
-  } catch {
-    // ignore
-  }
-
+  // If we reach here: token is invalid, expired, or the SDK is not configured.
+  // Return null so the caller can return HTTP 401.
   return null;
 }
 

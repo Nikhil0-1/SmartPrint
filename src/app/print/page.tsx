@@ -14,6 +14,8 @@ import {
   RefreshCw,
   Phone,
   Sparkles,
+  Clock,
+  Users,
 } from 'lucide-react';
 import { Footer } from '@/components/Footer';
 import { DEFAULT_BRANDING, DEFAULT_PRICING } from '@/lib/constants';
@@ -61,6 +63,14 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
   const [razorpayKeyId, setRazorpayKeyId] = useState<string>('');
   const [printStatusText, setPrintStatusText] = useState<string>('Verifying payment authorization...');
   const [cupsJobId, setCupsJobId] = useState<number | null>(null);
+
+  // Live FIFO Queue State
+  const [customerAccessToken, setCustomerAccessToken] = useState<string>('');
+  const [queuePosition, setQueuePosition] = useState<number>(1);
+  const [jobsAhead, setJobsAhead] = useState<number>(0);
+  const [assignedPrinterName, setAssignedPrinterName] = useState<string>('Assigned Printer');
+  const [liveQueueStatus, setLiveQueueStatus] = useState<string>('Added to print queue');
+  const [estimatedWaitSec, setEstimatedWaitSec] = useState<number>(0);
 
   // If a session token was passed, resolve it
   useEffect(() => {
@@ -179,13 +189,19 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
 
       setPaymentOrderId(data.order_id);
       setRazorpayKeyId(data.key_id);
+      if (data.customer_access_token) {
+        setCustomerAccessToken(data.customer_access_token);
+      }
+      if (data.printer_assigned) {
+        setAssignedPrinterName(data.printer_assigned);
+      }
     } catch (err) {
       setUploadError((err as Error).message);
       setStep('CONFIG');
     }
   };
 
-  // Execute Payment & Track Live Printing
+  // Execute Payment & Track Live Printing with FIFO Queue Feedback
   const handleVerifyAndPrint = async () => {
     try {
       setStep('PRINTING');
@@ -194,7 +210,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
       const paymentId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
       const mockSignature = `mock_sig_${Date.now()}`;
 
-      // 1. Verify Payment & Authorize single print
+      // 1. Verify Payment & Authorize single print in database
       const verifyRes = await fetch('/api/customer/verify-payment', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -209,36 +225,59 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
       const verifyData = await verifyRes.json();
       if (!verifyRes.ok) throw new Error(verifyData.error || 'Payment verification failed');
 
-      // 2. Poll / Trigger Pi Agent Execution
-      setPrintStatusText('Payment verified! Connecting to Raspberry Pi 3B+ agent...');
-      await new Promise((r) => setTimeout(r, 1000));
+      const token = verifyData.customer_access_token || customerAccessToken;
+      if (token) setCustomerAccessToken(token);
 
-      setPrintStatusText('Pi Agent spooled document. Submitting to CUPS queue...');
-      await new Promise((r) => setTimeout(r, 1200));
-
-      // Trigger simulation / status transition
-      const simRes = await fetch('/api/admin/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'simulate_print_lifecycle',
-          job_id: jobId,
-          kiosk_id: kioskId,
-        }),
-      });
-
-      const simData = await simRes.json();
-      if (simData.cups_job_id) {
-        setCupsJobId(simData.cups_job_id);
+      const initPos = verifyData.queue_position || 1;
+      const initAhead = verifyData.jobs_ahead || 0;
+      setQueuePosition(initPos);
+      setJobsAhead(initAhead);
+      if (verifyData.printer_name) setAssignedPrinterName(verifyData.printer_name);
+      setLiveQueueStatus(verifyData.status_label || 'Your document has been added to the print queue.');
+      setPrintStatusText(verifyData.status_label || 'Your document has been added to the print queue.');
+      if (verifyData.estimated_wait_seconds !== undefined) {
+        setEstimatedWaitSec(verifyData.estimated_wait_seconds);
       }
 
-      setPrintStatusText('Printer actively outputting pages...');
-      await new Promise((r) => setTimeout(r, 1500));
+      // 2. Poll live server-side queue status periodically
+      let pollCount = 0;
+      const maxPolls = 180; // 6 minutes max polling
+      const pollTimer = setInterval(async () => {
+        pollCount++;
+        try {
+          const qRes = await fetch(
+            `/api/customer/queue-status?job_id=${encodeURIComponent(jobId)}&token=${encodeURIComponent(token || '')}`
+          );
+          if (qRes.ok) {
+            const qData = await qRes.json();
+            if (qData.success) {
+              setQueuePosition(qData.queue_position);
+              setJobsAhead(qData.jobs_ahead);
+              if (qData.printer_name) setAssignedPrinterName(qData.printer_name);
+              setLiveQueueStatus(qData.status_label);
+              setPrintStatusText(qData.status_label);
+              if (qData.estimated_wait_seconds !== undefined) {
+                setEstimatedWaitSec(qData.estimated_wait_seconds);
+              }
 
-      setPrintStatusText('CUPS verified print output. Permanently destroying temporary file...');
-      await new Promise((r) => setTimeout(r, 1000));
+              if (qData.is_completed) {
+                clearInterval(pollTimer);
+                setStep('SUCCESS');
+              } else if (qData.is_failed) {
+                clearInterval(pollTimer);
+                setUploadError(qData.error_message || 'Print processing failed. Please contact campus support.');
+                setStep('ERROR');
+              }
+            }
+          }
+        } catch {
+          // Network hiccup - continue polling
+        }
 
-      setStep('SUCCESS');
+        if (pollCount >= maxPolls) {
+          clearInterval(pollTimer);
+        }
+      }, 2000);
     } catch (err) {
       setUploadError((err as Error).message);
       setStep('ERROR');
@@ -599,38 +638,82 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
           </div>
         )}
 
-        {/* STEP 4: LIVE PRINT PROGRESS */}
+        {/* STEP 4: LIVE PRINT PROGRESS & FIFO QUEUE WAITING EXPERIENCE */}
         {step === 'PRINTING' && (
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-6 text-center space-y-6 animate-in fade-in duration-300">
-            <div className="w-16 h-16 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center mx-auto animate-pulse">
-              <Printer className="w-8 h-8" />
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-6 text-center space-y-5 animate-in fade-in duration-300">
+            {/* Header / Verified Badge */}
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-bold border border-emerald-200 mx-auto">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Payment Verified Server-Side</span>
             </div>
 
-            <div className="space-y-1.5">
-              <h3 className="text-lg font-black text-slate-900">Printing in Progress</h3>
-              <p className="text-xs text-slate-600 font-medium">{printStatusText}</p>
+            <div className="space-y-1">
+              <h3 className="text-xl font-black text-slate-900">Your Document is in Queue</h3>
+              <p className="text-xs text-slate-500 font-medium">
+                Your document has been added to the physical printer&apos;s FIFO queue.
+              </p>
             </div>
 
-            <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3 text-xs text-left space-y-2">
-              <div className="flex items-center gap-2 text-emerald-600 font-semibold">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Payment Verified Server-Side</span>
+            {/* Live Queue Cards Grid */}
+            <div className="grid grid-cols-2 gap-3 text-left">
+              <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-3">
+                <div className="flex items-center gap-1.5 text-slate-500 text-[11px] font-semibold">
+                  <Users className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Queue Position</span>
+                </div>
+                <div className="mt-1 font-black text-2xl text-blue-600">
+                  #{queuePosition}
+                </div>
+                <div className="text-[10px] text-slate-400 mt-0.5">
+                  {jobsAhead === 0 ? 'Next in line to print' : `${jobsAhead} ${jobsAhead === 1 ? 'job' : 'jobs'} ahead of you`}
+                </div>
               </div>
-              <div className="flex items-center gap-2 text-blue-600 font-semibold">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                <span>Dispatched to Kiosk ({kioskId})</span>
+
+              <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-3">
+                <div className="flex items-center gap-1.5 text-slate-500 text-[11px] font-semibold">
+                  <Printer className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Assigned Printer</span>
+                </div>
+                <div className="mt-1 font-bold text-sm text-slate-900 truncate" title={assignedPrinterName}>
+                  {assignedPrinterName}
+                </div>
+                <div className="text-[10px] text-slate-400 mt-0.5">
+                  Kiosk: {kioskId}
+                </div>
               </div>
-              {cupsJobId && (
-                <div className="flex items-center gap-2 text-slate-600">
-                  <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-                  <span>CUPS Queue Job ID: #{cupsJobId}</span>
+            </div>
+
+            {/* Status Details Box */}
+            <div className="bg-blue-50/60 border border-blue-200/80 rounded-xl p-3.5 text-xs text-left space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-blue-900 flex items-center gap-1.5">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                  <span>Current Status:</span>
+                </span>
+                <span className="font-bold text-blue-700 bg-blue-100/80 px-2 py-0.5 rounded text-[11px]">
+                  {liveQueueStatus}
+                </span>
+              </div>
+
+              {estimatedWaitSec > 0 && (
+                <div className="flex items-center gap-1.5 text-[11px] text-blue-800">
+                  <Clock className="w-3 h-3 text-blue-600" />
+                  <span>Estimated wait: ~{estimatedWaitSec} seconds based on queue depth</span>
                 </div>
               )}
             </div>
 
-            <p className="text-[11px] text-slate-400">
-              Please wait at the printer output tray while the document finishes printing.
-            </p>
+            {/* Customer Notice */}
+            <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 text-left">
+              <p className="text-[11px] text-amber-900 font-medium leading-relaxed">
+                Please wait. Your print job is in the queue. Printing will start automatically when previous jobs are completed.
+              </p>
+            </div>
+
+            <div className="pt-1 flex items-center justify-between text-[11px] text-slate-400 font-mono border-t border-slate-100">
+              <span>Job ID: {jobId}</span>
+              <span>Device: {kioskId}</span>
+            </div>
           </div>
         )}
 

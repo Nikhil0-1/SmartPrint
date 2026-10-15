@@ -293,15 +293,23 @@ class SmartPrintAgent:
         download_url = job.get("signed_download_url") or f"{self.config['backend_url']}/api/kiosk/download/{job_id}?token={idempotency_key}"
 
         logging.info(f"========== START PRINT JOB {job_id} ==========")
+        # 1. Acknowledge job receipt to cloud server immediately
+        self.make_api_request("/api/kiosk/update-status", {
+            "job_id": job_id,
+            "status": "ACKNOWLEDGED",
+            "kiosk_id": self.config["kiosk_id"]
+        })
+
+        # 2. Transition to DOWNLOADING
         self.make_api_request("/api/kiosk/update-status", {"job_id": job_id, "status": "DOWNLOADING"})
 
-        # 1. Create temporary job workspace directory
+        # Create temporary job workspace directory (mode 0700)
         job_dir = os.path.join(TEMP_JOBS_DIR, job_id)
         os.makedirs(job_dir, mode=0o700, exist_ok=True)
         local_file_path = os.path.join(job_dir, "document.pdf")
 
         try:
-            # 2. Securely Download temporary document
+            # 3. Securely Download temporary document
             logging.info(f"Downloading temporary document for job {job_id}...")
             ctx = self.get_ssl_context()
 
@@ -310,11 +318,11 @@ class SmartPrintAgent:
                 f.write(resp.read())
             os.chmod(local_file_path, 0o600)
 
-            # 3. Update status to PROCESSING
+            # 4. Update status to PROCESSING
             self.make_api_request("/api/kiosk/update-status", {"job_id": job_id, "status": "PROCESSING"})
 
-            # 4. Submit to CUPS using server-selected queue
-            target_queue = job.get("cups_printer_name") or job.get("cups_queue_name")
+            # 5. Submit to CUPS using server-selected queue
+            target_queue = job.get("cups_printer_name") or job.get("cups_queue_name") or self.cups.default_queue
             options = {
                 "copies": job.get("copies", 1),
                 "pages_selected": job.get("pages_selected", "All"),
@@ -323,8 +331,14 @@ class SmartPrintAgent:
                 "orientation": job.get("orientation", "portrait")
             }
 
+            self.make_api_request("/api/kiosk/update-status", {
+                "job_id": job_id,
+                "status": "SUBMITTED_TO_CUPS",
+                "queue_name": target_queue
+            })
+
             cups_job_id = self.cups.submit_print_job(local_file_path, options, queue_name=target_queue)
-            logging.info(f"Submitted to CUPS queue '{target_queue or self.cups.default_queue}' with job ID {cups_job_id}")
+            logging.info(f"Submitted to CUPS queue '{target_queue}' with job ID {cups_job_id}")
 
             self.make_api_request("/api/kiosk/update-status", {
                 "job_id": job_id,
@@ -332,7 +346,7 @@ class SmartPrintAgent:
                 "cups_job_id": cups_job_id
             })
 
-            # 5. Wait for verified completion on target queue
+            # 6. Wait for verified completion on target queue
             success, status_msg = self.cups.wait_for_job_completion(cups_job_id, timeout_seconds=120, queue_name=target_queue)
 
             if success:
@@ -349,7 +363,7 @@ class SmartPrintAgent:
                     "status": "COMPLETED"
                 })
 
-                # 6. IMMEDIATELY DESTROY LOCAL FILE
+                # 7. IMMEDIATELY DESTROY LOCAL FILE
                 secure_wipe_file(local_file_path)
                 try:
                     os.rmdir(job_dir)
@@ -358,11 +372,13 @@ class SmartPrintAgent:
                 logging.info(f"CLEANUP VERIFIED: Local temporary file & directory destroyed for job {job_id}")
 
             else:
-                logging.error(f"Print failed for job {job_id}: {status_msg}")
+                logging.error(f"Print uncertain/failed for job {job_id}: {status_msg}")
+                outcome_status = "OUTCOME_UNCERTAIN" if "timed out" in status_msg.lower() else "RECOVERY_REQUIRED"
                 self.make_api_request("/api/kiosk/update-status", {
                     "job_id": job_id,
-                    "status": "RECOVERY_REQUIRED",
-                    "error_message": status_msg
+                    "status": outcome_status,
+                    "error_message": status_msg,
+                    "cups_job_id": cups_job_id
                 })
 
         except Exception as e:

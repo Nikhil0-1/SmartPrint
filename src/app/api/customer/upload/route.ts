@@ -113,6 +113,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
+      job_id: job.id,
       job: {
         id: job.id,
         organization_id: job.organization_id,

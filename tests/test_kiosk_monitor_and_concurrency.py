@@ -17,7 +17,7 @@ import time
 import urllib.request
 import urllib.error
 
-BASE_URL = "http://localhost:3001"
+BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:3000"
 
 def post(endpoint, payload=None, headers=None):
     url = f"{BASE_URL}{endpoint}"

@@ -7,7 +7,9 @@ import urllib.request
 import json
 import time
 
-BASE_URL = "http://localhost:3001"
+import sys
+
+BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:3000"
 
 def post(endpoint, payload=None, headers=None):
     url = f"{BASE_URL}{endpoint}"
@@ -129,7 +131,7 @@ def run_tests():
         "action": "simulate_print_lifecycle",
         "job_id": job_id,
         "kiosk_id": "GITAM-SPK-001"
-    })
+    }, headers={"Authorization": "Bearer test_admin_token"})
     assert sim_res["success"], f"Simulation failed: {sim_res}"
     assert sim_res["cleanup_verified"] is True, "Document was not confirmed purged!"
     print(f"  [PASS] Print Completed on CUPS #{sim_res['cups_job_id']}")

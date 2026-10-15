@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { store, GITAM_ORG_ID } from '@/lib/store';
 import { authenticateRequest, SUPER_ADMIN_EMAILS } from '@/lib/auth';
+import { dbWriteAuditLog, dbUpdateMemberFirebaseUid } from '@/lib/db';
 
 export async function POST(request: Request) {
   try {
@@ -25,59 +25,40 @@ export async function POST(request: Request) {
     const verifiedUser = authResult.user;
     const normalizedEmail = verifiedUser.email.toLowerCase().trim();
 
+    // Cross-check: if body includes an email, it must match the token email
     if (bodyEmail && bodyEmail !== normalizedEmail) {
-      store.logAudit(normalizedEmail, 'EMAIL_MISMATCH_REJECTED', 'admin_users', verifiedUser.uid, {
-        token_email: normalizedEmail,
-        body_email: bodyEmail,
+      await dbWriteAuditLog({
+        admin_email: normalizedEmail,
+        action: 'EMAIL_MISMATCH_REJECTED',
+        target_type: 'admin_users',
+        target_id: verifiedUser.uid,
+        details: {
+          token_email: normalizedEmail,
+          body_email: bodyEmail,
+        },
       });
-      return NextResponse.json({ error: 'Token email does not match request email.' }, { status: 403 });
+      return NextResponse.json(
+        { error: 'Token email does not match request email.' },
+        { status: 403 }
+      );
     }
 
-    // Resolve member record and role from the database — never trust client-supplied roles
-    let member = store.getMemberByEmail(normalizedEmail);
-    const isPlatformSuperAdmin =
-      SUPER_ADMIN_EMAILS.includes(normalizedEmail) ||
-      normalizedEmail.includes('superadmin') ||
-      member?.role === 'SUPER_ADMIN';
+    // Update the firebase_uid in the database if the member was seeded with
+    // a placeholder UID. This ensures future lookups by UID work correctly.
+    await dbUpdateMemberFirebaseUid(normalizedEmail, verifiedUser.uid);
 
-    if (!isPlatformSuperAdmin && !member) {
-      // Allow users created in Firebase to be auto-provisioned if their email is admin-oriented or GITAM-affiliated
-      if (
-        normalizedEmail.includes('admin') ||
-        normalizedEmail.endsWith('@gitam.edu') ||
-        normalizedEmail.endsWith('@gitam.in') ||
-        normalizedEmail.includes('gitam')
-      ) {
-        member = store.addMember({
-          organization_id: GITAM_ORG_ID,
-          firebase_uid: verifiedUser.uid,
-          email: normalizedEmail,
-          full_name: normalizedEmail.split('@')[0].toUpperCase(),
-          role: 'ORG_ADMIN',
-          status: 'ACTIVE',
-        }, normalizedEmail);
-      } else {
-        store.logAudit(normalizedEmail, 'UNAUTHORIZED_LOGIN_ATTEMPT', 'admin_users', verifiedUser.uid, {
-          email: normalizedEmail,
-          result: 'REJECTED_NOT_A_MEMBER',
-        });
-        return NextResponse.json(
-          { error: 'Access denied: You are not an authorized administrator of any organization.' },
-          { status: 403 }
-        );
-      }
-    }
-
-    const role = isPlatformSuperAdmin ? 'SUPER_ADMIN' : (member?.role || 'ORG_ADMIN');
-    const authorizedOrganizationIds = isPlatformSuperAdmin
-      ? store.getOrganizations().map((o) => o.id)
-      : store.getOrganizationsForMember(normalizedEmail);
-
-    store.logAudit(normalizedEmail, 'ADMIN_LOGIN_SUCCESS', 'admin_users', verifiedUser.uid, {
-      role,
-      organizations: authorizedOrganizationIds,
-      auth_provider: 'firebase',
-      timestamp: new Date().toISOString(),
+    // Log successful login
+    await dbWriteAuditLog({
+      admin_email: normalizedEmail,
+      action: 'ADMIN_LOGIN_SUCCESS',
+      target_type: 'admin_users',
+      target_id: verifiedUser.uid,
+      details: {
+        role: verifiedUser.role,
+        organizations: verifiedUser.authorizedOrganizationIds,
+        auth_provider: 'firebase',
+        timestamp: new Date().toISOString(),
+      },
     });
 
     return NextResponse.json({
@@ -85,13 +66,20 @@ export async function POST(request: Request) {
       user: {
         email: normalizedEmail,
         uid: verifiedUser.uid,
-        fullName: member?.full_name || (isPlatformSuperAdmin ? 'Platform Super Admin' : 'Admin'),
-        role,
-        isSuperAdmin: isPlatformSuperAdmin,
-        authorizedOrganizationIds,
-        permissions: isPlatformSuperAdmin
+        fullName: verifiedUser.fullName,
+        role: verifiedUser.role,
+        isSuperAdmin: verifiedUser.isSuperAdmin,
+        authorizedOrganizationIds: verifiedUser.authorizedOrganizationIds,
+        permissions: verifiedUser.isSuperAdmin
           ? ['all']
-          : ['view_dashboard', 'manage_kiosks', 'manage_printers', 'manage_jobs', 'manage_payments', 'trigger_test_print'],
+          : [
+              'view_dashboard',
+              'manage_kiosks',
+              'manage_printers',
+              'manage_jobs',
+              'manage_payments',
+              'trigger_test_print',
+            ],
       },
     });
   } catch (error) {
@@ -102,4 +90,3 @@ export async function POST(request: Request) {
     );
   }
 }
-

@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
 import { authenticateRequest } from '@/lib/auth';
+import {
+  dbGetPricing,
+  dbUpsertPricing,
+  dbGetOrganizationBySlug,
+  dbWriteAuditLog,
+} from '@/lib/db';
+import { DEFAULT_PRICING } from '@/lib/constants';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -8,16 +15,33 @@ export async function GET(request: Request) {
   const orgSlug = searchParams.get('slug') || searchParams.get('org') || '';
 
   if (!orgId && orgSlug) {
-    const org = store.getOrganizationBySlug(orgSlug);
-    if (org) orgId = org.id;
+    const org = await dbGetOrganizationBySlug(orgSlug);
+    if (org) {
+      orgId = org.id;
+    } else {
+      const storeOrg = store.getOrganizationBySlug(orgSlug);
+      if (storeOrg) orgId = storeOrg.id;
+    }
   }
 
   if (!orgId) {
     orgId = GITAM_ORG_ID;
   }
 
-  const pricing = store.getPricing(orgId);
-  return NextResponse.json({ success: true, pricing });
+  // Fetch pricing from Supabase (authoritative source), fallback to store
+  const dbPricing = await dbGetPricing(orgId);
+  const storePricing = store.getPricing(orgId);
+  const pricing = dbPricing || storePricing || {
+    ...DEFAULT_PRICING,
+    organization_id: orgId,
+    bw_price_paise: 100,
+    color_price_paise: 500,
+  };
+
+  return NextResponse.json({
+    success: true,
+    pricing,
+  });
 }
 
 export async function PUT(request: Request) {
@@ -32,12 +56,65 @@ export async function PUT(request: Request) {
     const orgId = body.organization_id || auth.user.authorizedOrganizationIds[0] || GITAM_ORG_ID;
 
     if (!auth.user.isSuperAdmin && !auth.user.authorizedOrganizationIds.includes(orgId)) {
-      return NextResponse.json({ error: 'Access denied to update pricing for this organization' }, { status: 403 });
+      return NextResponse.json(
+        { error: 'Access denied to update pricing for this organization' },
+        { status: 403 }
+      );
     }
 
-    const updated = store.updatePricing(orgId, body, adminEmail);
+    // Validate numeric pricing values
+    const numericFields = [
+      'bw_price_per_page', 'color_price_per_page', 'service_charge',
+      'min_order_amount', 'max_pages', 'max_copies', 'max_file_size_mb',
+    ];
+    const sanitized: Record<string, unknown> = { updated_by: adminEmail };
+
+    for (const field of numericFields) {
+      if (field in body) {
+        const val = Number(body[field]);
+        if (isNaN(val) || val < 0) {
+          return NextResponse.json(
+            { error: `Invalid value for ${field}: must be a non-negative number.` },
+            { status: 400 }
+          );
+        }
+        // Reasonable upper bounds
+        if (field === 'bw_price_per_page' && val > 1000) {
+          return NextResponse.json({ error: 'bw_price_per_page too high.' }, { status: 400 });
+        }
+        if (field === 'color_price_per_page' && val > 5000) {
+          return NextResponse.json({ error: 'color_price_per_page too high.' }, { status: 400 });
+        }
+        sanitized[field] = val;
+      }
+    }
+
+    if (Object.keys(sanitized).length <= 1) {
+      return NextResponse.json({ error: 'No valid pricing fields provided.' }, { status: 400 });
+    }
+
+    // Persist to Supabase — authoritative source of truth
+    const updated = await dbUpsertPricing(orgId, sanitized);
+    if (!updated) {
+      return NextResponse.json(
+        { error: 'Database write failed. Pricing was NOT saved.' },
+        { status: 500 }
+      );
+    }
+
+    // Audit log
+    await dbWriteAuditLog({
+      admin_email: adminEmail,
+      action: 'UPDATE_PRICING',
+      target_type: 'pricing',
+      target_id: orgId,
+      details: sanitized,
+      organization_id: orgId,
+    });
+
     return NextResponse.json({ success: true, pricing: updated });
   } catch (error) {
+    console.error('[PRICING PUT ERROR]:', error);
     return NextResponse.json(
       { success: false, error: (error as Error).message },
       { status: 400 }

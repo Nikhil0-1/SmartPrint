@@ -1,19 +1,50 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
+import {
+  dbGetPrintJob,
+  dbCreatePrintJob,
+  dbSelectBestPrinterForJob,
+  dbCreatePaymentOrder,
+  dbUpdatePrintJobStatus,
+} from '@/lib/db';
 import { createMultiTenantRazorpayOrder, getPublicRazorpayKeyId } from '@/lib/razorpay';
 
 export async function POST(request: Request) {
   try {
-    const { job_id } = await request.json();
+    let job_id: string | undefined;
+    try {
+      const body = await request.json();
+      job_id = body?.job_id;
+    } catch {
+      return NextResponse.json({ error: 'Invalid or empty request body' }, { status: 400 });
+    }
 
     if (!job_id) {
       return NextResponse.json({ error: 'job_id is required' }, { status: 400 });
     }
 
-    let job = store.getJob(job_id);
-    if (!job) {
-      // Serverless fallback: recreate job record
-      job = store.createJob({
+    // 1. Fetch from Database first, fallback to store
+    let dbJob = await dbGetPrintJob(job_id);
+    let storeJob = store.getJob(job_id);
+
+    if (!dbJob && !storeJob) {
+      // Recreate job record for serverless recovery
+      dbJob = await dbCreatePrintJob({
+        id: job_id,
+        organization_id: GITAM_ORG_ID,
+        session_id: 'recovered_session',
+        kiosk_id: 'GITAM-SPK-001',
+        pages_total: 1,
+        pages_selected: 'All',
+        copies: 1,
+        is_color: false,
+        is_duplex: false,
+        calculated_amount: 1.0,
+        amount_paise: 100,
+        status: 'UPLOAD_COMPLETE',
+      });
+
+      storeJob = store.createJob({
         id: job_id,
         organization_id: GITAM_ORG_ID,
         session_id: 'recovered_session',
@@ -29,76 +60,106 @@ export async function POST(request: Request) {
       });
     }
 
-    if (job.status !== 'UPLOAD_COMPLETE' && job.status !== 'VALIDATING' && job.status !== 'PAYMENT_PENDING') {
+    const currentStatus = dbJob?.status || storeJob?.status;
+    if (
+      currentStatus !== 'UPLOAD_COMPLETE' &&
+      currentStatus !== 'VALIDATING' &&
+      currentStatus !== 'PAYMENT_PENDING'
+    ) {
       return NextResponse.json(
-        { error: `Job is in status '${job.status}' and cannot receive payment.` },
+        { error: `Job is in status '${currentStatus}' and cannot receive payment.` },
         { status: 400 }
       );
     }
 
-    const organizationId = job.organization_id || GITAM_ORG_ID;
+    const organizationId: string = (dbJob?.organization_id as string) || storeJob?.organization_id || GITAM_ORG_ID;
+    const kioskId: string = (dbJob?.kiosk_id as string) || storeJob?.kiosk_id || 'GITAM-SPK-001';
+    const isColor: boolean = dbJob?.is_color ?? storeJob?.is_color ?? false;
+    const isDuplex: boolean = dbJob?.is_duplex ?? storeJob?.is_duplex ?? false;
+    const calculatedAmount: number = Number(dbJob?.calculated_amount ?? storeJob?.calculated_amount ?? 1.0);
+    const amountPaise: number =
+      Number(dbJob?.amount_paise) ||
+      storeJob?.amount_paise ||
+      Math.round(calculatedAmount * 100);
 
-    // SERVER-SIDE PRINTER ROUTING SAFETY CHECK
-    // Verify printer availability before accepting payment
-    const printerCheck = store.selectPrinterForJob(job.kiosk_id, job.is_color, job.is_duplex);
-    let selectedPrinter = printerCheck.printer;
-    if (!printerCheck.success || !selectedPrinter) {
-      // Fallback to any ready printer in kiosk
-      const allPrinters = store.getPrinters(organizationId);
-      selectedPrinter = allPrinters.find((p) => p.status === 'READY') || allPrinters[0];
-      if (!selectedPrinter) {
-        return NextResponse.json(
-          {
-            error: printerCheck.error_message || 'The required printer is currently unavailable.',
-            code: 'PRINTER_UNAVAILABLE',
-          },
-          { status: 503 }
-        );
+    // 2. SERVER-SIDE PRINTER ROUTING SAFETY CHECK
+    // Database authoritative printer selection
+    const printerSelection = await dbSelectBestPrinterForJob(kioskId, isColor, isDuplex, organizationId);
+    let selectedPrinter = printerSelection.printer;
+
+    if (!selectedPrinter) {
+      // Fallback to store printer selection
+      const storePrinterCheck = store.selectPrinterForJob(kioskId, isColor, isDuplex);
+      if (storePrinterCheck.printer) {
+        selectedPrinter = storePrinterCheck.printer as any;
       }
     }
 
-    // Assign chosen printer to job
-    job.printer_id = selectedPrinter.id;
+    if (!selectedPrinter) {
+      return NextResponse.json(
+        {
+          error: printerSelection.error || 'The required printer is currently unavailable.',
+          code: 'PRINTER_UNAVAILABLE',
+        },
+        { status: 503 }
+      );
+    }
 
-    const amountPaise = job.amount_paise || Math.round((job.calculated_amount || 1.0) * 100);
-
-    // Create Order with organization's configured Razorpay credentials
+    // 3. Create Razorpay order with organization's configured credentials
     const order = await createMultiTenantRazorpayOrder(
       organizationId,
       amountPaise,
-      job.id,
+      job_id,
       {
-        kiosk_id: job.kiosk_id,
+        kiosk_id: kioskId,
         printer_id: selectedPrinter.id,
       }
     );
 
-    // Register payment order in ledger
-    store.createPaymentOrder({
-      id: `po_${order.id}`,
+    if (!order) {
+      return NextResponse.json({ error: 'Failed to create Razorpay order.' }, { status: 500 });
+    }
+
+    const orderId = (order as any).id as string;
+    const orderAmount = (order as any).amount as number;
+
+    // 4. Register payment order in authoritative database
+    await dbCreatePaymentOrder({
+      job_id,
       organization_id: organizationId,
-      job_id: job.id,
-      razorpay_order_id: order.id,
+      razorpay_order_id: orderId,
+      amount_paise: amountPaise,
+      currency: 'INR',
+    });
+
+    // Also mirror to store
+    store.createPaymentOrder({
+      id: `po_${orderId}`,
+      organization_id: organizationId,
+      job_id,
+      razorpay_order_id: orderId,
       amount_paise: amountPaise,
       currency: 'INR',
       status: 'CREATED',
       created_at: new Date().toISOString(),
     });
 
-    store.createPayment(job.id, order.id, job.calculated_amount, 'INR', organizationId);
-    store.updateJobStatus(job.id, 'PAYMENT_PENDING');
+    store.createPayment(job_id, orderId, calculatedAmount, 'INR', organizationId);
+    await dbUpdatePrintJobStatus(job_id, 'PAYMENT_PENDING');
+    store.updateJobStatus(job_id, 'PAYMENT_PENDING');
 
     return NextResponse.json({
       success: true,
-      order_id: order.id,
-      amount: order.amount,
-      amount_rupees: job.calculated_amount,
+      order_id: orderId,
+      amount: orderAmount,
+      amount_rupees: calculatedAmount,
       amount_paise: amountPaise,
       currency: 'INR',
-      key_id: getPublicRazorpayKeyId(organizationId),
-      job_id: job.id,
+      key_id: await getPublicRazorpayKeyId(organizationId),
+      job_id,
+      customer_access_token: dbJob?.customer_access_token || null,
       organization_id: organizationId,
-      printer_assigned: selectedPrinter.display_name,
+      printer_assigned: selectedPrinter.display_name || selectedPrinter.printer_name,
     });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });

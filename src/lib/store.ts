@@ -476,35 +476,17 @@ class StateManager {
 
     if (kiosk.active_job_id && kiosk.active_job_id !== jobId) {
       const activeJob = this.jobs.get(kiosk.active_job_id);
-      if (activeJob) {
-        const jobAgeMs = Date.now() - new Date(activeJob.created_at).getTime();
-        const isStale = jobAgeMs > 3 * 60 * 1000; // 3 minutes timeout for abandoned pre-payment jobs
-
-        // Only lock kiosk if an active job is actively in printing/device queue or very recently queued (< 3 mins)
-        const isActivelyPrinting = [
-          'PAYMENT_VERIFIED',
-          'QUEUED',
-          'DEVICE_ACCEPTED',
-          'DOWNLOADING',
-          'PROCESSING',
-          'SUBMITTED_TO_CUPS',
-          'PRINTING',
-        ].includes(activeJob.status);
-
-        if (isActivelyPrinting && !isStale) {
-          return {
-            success: false,
-            error: 'Kiosk is currently processing a print job for another customer. Please wait for the current job to finish.',
-          };
-        }
-
-        // If pre-payment job is very fresh (< 60s), notify customer
-        if (!isStale && !isActivelyPrinting && jobAgeMs < 60 * 1000) {
-          return {
-            success: false,
-            error: 'Another document is currently being prepared on this kiosk. Please retry in 1 minute.',
-          };
-        }
+      if (
+        activeJob &&
+        activeJob.status !== 'COMPLETED' &&
+        activeJob.status !== 'FAILED' &&
+        activeJob.status !== 'EXPIRED' &&
+        activeJob.status !== 'CANCELLED'
+      ) {
+        return {
+          success: false,
+          error: 'Kiosk is currently busy with another customer. Please wait.',
+        };
       }
     }
 
