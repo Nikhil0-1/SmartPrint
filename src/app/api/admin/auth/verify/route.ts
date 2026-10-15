@@ -61,7 +61,7 @@ export async function POST(request: Request) {
       },
     });
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       user: {
         email: normalizedEmail,
@@ -82,6 +82,16 @@ export async function POST(request: Request) {
             ],
       },
     });
+
+    response.cookies.set('smartprint_auth', 'true', {
+      path: '/',
+      httpOnly: false,
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+    });
+
+    return response;
   } catch (error) {
     console.error('[ADMIN AUTH VERIFY ERROR]:', error);
     return NextResponse.json(

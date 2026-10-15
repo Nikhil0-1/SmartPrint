@@ -51,8 +51,9 @@ export default function SuperAdminLoginPage() {
         return;
       }
 
-      // Store token & redirect to Super Admin dashboard
+      // Store token & cookies, then redirect to Super Admin dashboard
       if (typeof window !== 'undefined') {
+        document.cookie = 'smartprint_auth=true; path=/; max-age=604800; SameSite=Lax';
         localStorage.setItem('smartprint_admin_token', idToken);
         localStorage.setItem('smartprint_user_role', 'SUPER_ADMIN');
       }

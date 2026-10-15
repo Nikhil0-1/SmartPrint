@@ -44,8 +44,9 @@ export default function AdminLoginPage() {
         throw new Error(data.error || 'Authentication failed');
       }
 
-      // Store in localStorage for session persistence
+      // Store in localStorage & cookies for session persistence
       if (typeof window !== 'undefined') {
+        document.cookie = 'smartprint_auth=true; path=/; max-age=604800; SameSite=Lax';
         localStorage.setItem('smartprint_admin_token', idToken);
         localStorage.setItem('smartprint_user_role', data.user.role);
         localStorage.setItem('smartprint_user_email', data.user.email);
