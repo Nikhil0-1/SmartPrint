@@ -434,9 +434,11 @@ export async function dbUpsertPricing(
   organizationId: string,
   updates: Partial<Omit<DbPricing, 'id'>>
 ): Promise<DbPricing | null> {
-  if (!isConfigured()) return null;
+  if (!isConfigured()) {
+    console.warn('[DB] dbUpsertPricing: Supabase not configured — check env vars.');
+    return null;
+  }
 
-  const existing = await dbGetPricing(organizationId);
   const now = new Date().toISOString();
 
   // Automatically compute paise values from per-page prices if provided
@@ -448,32 +450,30 @@ export async function dbUpsertPricing(
     pricePaise.color_price_paise = Math.round(updates.color_price_per_page * 100);
   }
 
-  const payload = { ...updates, ...pricePaise, updated_at: now };
+  // Single atomic upsert — no separate GET needed, no race condition,
+  // works even if the row does not yet exist.
+  const payload = {
+    ...updates,
+    ...pricePaise,
+    organization_id: organizationId,
+    updated_at: now,
+  };
 
-  if (existing) {
-    const { data, error } = await supabaseAdmin
-      .from('pricing')
-      .update(payload)
-      .eq('organization_id', organizationId)
-      .select()
-      .single();
-    if (error) {
-      console.error('[DB] updatePricing error:', error.message);
-      return null;
-    }
-    return data;
-  } else {
-    const { data, error } = await supabaseAdmin
-      .from('pricing')
-      .insert({ ...payload, organization_id: organizationId })
-      .select()
-      .single();
-    if (error) {
-      console.error('[DB] insertPricing error:', error.message);
-      return null;
-    }
-    return data;
+  const { data, error } = await supabaseAdmin
+    .from('pricing')
+    .upsert(payload, { onConflict: 'organization_id', ignoreDuplicates: false })
+    .select()
+    .single();
+
+  if (error) {
+    console.error(
+      `[DB] upsertPricing error [code=${error.code}]:`,
+      error.message,
+      error.details ?? ''
+    );
+    return null;
   }
+  return data;
 }
 
 // ─── Payment Configurations ───────────────────────────────────────────────────
