@@ -9,7 +9,7 @@
  * The store is retained only for transient session state.
  */
 
-import { supabaseAdmin } from './supabase';
+import { supabaseAdmin, isSupabaseConfigured } from './supabase';
 import { randomBytes } from 'crypto';
 
 // ─── Type aliases ───────────────────────────────────────────────────────────
@@ -223,10 +223,13 @@ export interface DbQueueStatus {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+function isValidUuid(val?: string | null): boolean {
+  if (!val) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+}
+
 function isConfigured(): boolean {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  return Boolean(url && key && !url.includes('placeholder') && !key.includes('placeholder'));
+  return isSupabaseConfigured();
 }
 
 // ─── Organizations ────────────────────────────────────────────────────────────
@@ -928,7 +931,7 @@ export async function dbCreatePrintJob(job: {
   const newJob: Partial<DbPrintJob> = {
     id: job.id,
     organization_id: job.organization_id,
-    session_id: job.session_id || null,
+    session_id: isValidUuid(job.session_id) ? job.session_id : null,
     kiosk_id: job.kiosk_id,
     printer_id: job.printer_id || null,
     status: job.status || 'CREATED',
