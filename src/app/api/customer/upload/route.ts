@@ -1,4 +1,4 @@
-﻿import { NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
 import { validateAndExtractPages, saveTemporaryDocumentMultiTenant } from '@/lib/fileSecurity';
 import { dbGetKiosk, dbGetPricing, dbCreatePrintJob } from '@/lib/db';
@@ -32,14 +32,14 @@ export async function POST(request: Request) {
 
     // Get pricing: prefer DB row, fallback in-memory store
     const dbPricing = dbPricingForOrg || (await dbGetPricing(organizationId));
-    const pricing = (dbPricing || store.getPricing(organizationId)) as Record<string, unknown>;
-    const maxFileSizeMb = (pricing?.max_file_size_mb as number) ?? 40;
-    const maxPages = (pricing?.max_pages as number) ?? 100;
+    const pricing = dbPricing || store.getPricing(organizationId);
+    const maxFileSizeMb = pricing?.max_file_size_mb ?? 40;
+    const maxPages = pricing?.max_pages ?? 100;
 
     // EARLY size guard - reject before reading file into memory
     if (file.size > maxFileSizeMb * 1024 * 1024) {
       return NextResponse.json(
-        { error: File size ( MB) exceeds the  MB limit. },
+        { error: `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the ${maxFileSizeMb} MB limit.` },
         { status: 400 }
       );
     }
@@ -55,7 +55,7 @@ export async function POST(request: Request) {
     const pageCount = validation.pageCount || 1;
     if (pageCount > maxPages) {
       return NextResponse.json(
-        { error: Document has  pages, exceeding the -page limit. },
+        { error: `Document has ${pageCount} pages, exceeding the ${maxPages}-page limit.` },
         { status: 400 }
       );
     }
@@ -63,8 +63,8 @@ export async function POST(request: Request) {
     // Generate Job ID
     const nowStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const jobId = SP--;
-    const idempotencyKey = idemp__;
+    const jobId = `SP-${nowStr}-${randomSuffix}`;
+    const idempotencyKey = `idemp_${jobId}_${Date.now()}`;
 
     // Kiosk concurrency control
     const reservation = store.reserveKioskForJob(kioskId, jobId);
@@ -72,8 +72,8 @@ export async function POST(request: Request) {
 
     // Calculate price in paise
     const bwPricePaise =
-      (pricing?.bw_price_paise as number) ||
-      Math.round(((pricing?.bw_price_per_page as number) ?? 2.5) * 100);
+      pricing?.bw_price_paise ||
+      Math.round((pricing?.bw_price_per_page ?? 2.5) * 100);
     const initialPaise = pageCount * bwPricePaise;
     const initialAmountRupees = initialPaise / 100;
 
@@ -81,32 +81,60 @@ export async function POST(request: Request) {
     const [uploadResult, dbJob] = await Promise.all([
       saveTemporaryDocumentMultiTenant(organizationId, sessionId || 'sess_default', jobId, buffer, file.type, file.name),
       dbCreatePrintJob({
-        id: jobId, organization_id: organizationId, session_id: sessionId || null,
-        kiosk_id: kioskId, pages_total: pageCount, pages_selected: 'All',
-        copies: 1, is_color: false, is_duplex: false, orientation: 'portrait', paper_size: 'A4',
-        calculated_amount: initialAmountRupees, amount_paise: initialPaise,
-        idempotency_key: idempotencyKey, document_name: file.name, status: 'UPLOAD_COMPLETE',
+        id: jobId,
+        organization_id: organizationId,
+        session_id: sessionId || null,
+        kiosk_id: kioskId,
+        pages_total: pageCount,
+        pages_selected: 'All',
+        copies: 1,
+        is_color: false,
+        is_duplex: false,
+        orientation: 'portrait',
+        paper_size: 'A4',
+        calculated_amount: initialAmountRupees,
+        amount_paise: initialPaise,
+        idempotency_key: idempotencyKey,
+        document_name: file.name,
+        status: 'UPLOAD_COMPLETE',
       }),
     ]);
 
     // Register in in-memory store for local fallback
     store.registerFile(jobId, file.name, file.type, file.size, pageCount, uploadResult.objectKey, organizationId);
     store.createJob({
-      id: jobId, organization_id: organizationId, session_id: sessionId, kiosk_id: kioskId,
-      pages_total: pageCount, pages_selected: 'All', copies: 1, is_color: false, is_duplex: false,
-      orientation: 'portrait', paper_size: 'A4', calculated_amount: initialAmountRupees,
-      amount_paise: initialPaise, idempotency_key: idempotencyKey, original_filename: file.name,
+      id: jobId,
+      organization_id: organizationId,
+      session_id: sessionId,
+      kiosk_id: kioskId,
+      pages_total: pageCount,
+      pages_selected: 'All',
+      copies: 1,
+      is_color: false,
+      is_duplex: false,
+      orientation: 'portrait',
+      paper_size: 'A4',
+      calculated_amount: initialAmountRupees,
+      amount_paise: initialPaise,
+      idempotency_key: idempotencyKey,
+      original_filename: file.name,
       storage_object_key: uploadResult.objectKey,
     });
     store.updateJobStatus(jobId, 'UPLOAD_COMPLETE');
     void dbJob;
 
     return NextResponse.json({
-      success: true, job_id: jobId, storage_provider: uploadResult.storageProvider,
+      success: true,
+      job_id: jobId,
+      storage_provider: uploadResult.storageProvider,
       job: {
-        id: jobId, organization_id: organizationId, pages_total: pageCount,
-        calculated_amount: initialAmountRupees, amount_paise: initialPaise,
-        original_filename: file.name, kiosk_id: kioskId,
+        id: jobId,
+        organization_id: organizationId,
+        pages_total: pageCount,
+        calculated_amount: initialAmountRupees,
+        amount_paise: initialPaise,
+        original_filename: file.name,
+        kiosk_id: kioskId,
       },
     });
   } catch (error) {
