@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
+import { dbGetPricing } from '@/lib/db';
 
 export async function POST(request: Request) {
   try {
@@ -20,7 +21,8 @@ export async function POST(request: Request) {
       targetOrgId = job.organization_id;
     }
 
-    const pricing = store.getPricing(targetOrgId);
+    const dbPricing = await dbGetPricing(targetOrgId);
+    const pricing = dbPricing || store.getPricing(targetOrgId);
     const copiesNum = Math.max(1, Math.min(Number(copies) || 1, pricing.max_copies));
 
     // Standalone price preview
