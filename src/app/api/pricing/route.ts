@@ -14,17 +14,20 @@ export async function GET(request: Request) {
   let orgId = searchParams.get('org_id') || searchParams.get('organization_id') || '';
   const orgSlug = searchParams.get('slug') || searchParams.get('org') || '';
 
-  if (!orgId && orgSlug) {
-    const org = await dbGetOrganizationBySlug(orgSlug);
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  if (orgSlug || (orgId && !UUID_REGEX.test(orgId))) {
+    const slugToFind = orgSlug || orgId;
+    const org = await dbGetOrganizationBySlug(slugToFind);
     if (org) {
       orgId = org.id;
     } else {
-      const storeOrg = store.getOrganizationBySlug(orgSlug);
+      const storeOrg = store.getOrganizationBySlug(slugToFind);
       if (storeOrg) orgId = storeOrg.id;
     }
   }
 
-  if (!orgId) {
+  if (!orgId || !UUID_REGEX.test(orgId)) {
     orgId = GITAM_ORG_ID;
   }
 
@@ -51,9 +54,32 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: auth.error || 'Authentication required' }, { status: auth.status });
     }
 
-    const body = await request.json();
+    const { searchParams } = new URL(request.url);
+    const paramOrgId = searchParams.get('org_id') || searchParams.get('organization_id') || '';
+    const paramSlug = searchParams.get('slug') || searchParams.get('org') || '';
+
+    const body = await request.json().catch(() => ({}));
     const adminEmail = auth.user.email;
-    const orgId = body.organization_id || auth.user.authorizedOrganizationIds[0] || GITAM_ORG_ID;
+
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    let orgId = body.organization_id || body.org_id || paramOrgId;
+    const slug = body.slug || paramSlug;
+
+    if (slug || (orgId && !UUID_REGEX.test(orgId))) {
+      const slugToFind = slug || orgId;
+      const org = await dbGetOrganizationBySlug(slugToFind);
+      if (org) {
+        orgId = org.id;
+      } else {
+        const storeOrg = store.getOrganizationBySlug(slugToFind);
+        if (storeOrg) orgId = storeOrg.id;
+      }
+    }
+
+    if (!orgId || !UUID_REGEX.test(orgId)) {
+      orgId = auth.user.authorizedOrganizationIds[0] || GITAM_ORG_ID;
+    }
 
     if (!auth.user.isSuperAdmin && !auth.user.authorizedOrganizationIds.includes(orgId)) {
       return NextResponse.json(
@@ -70,7 +96,7 @@ export async function PUT(request: Request) {
     const sanitized: Record<string, unknown> = { updated_by: adminEmail };
 
     for (const field of numericFields) {
-      if (field in body) {
+      if (field in body && body[field] !== undefined && body[field] !== null && body[field] !== '') {
         const val = Number(body[field]);
         if (isNaN(val) || val < 0) {
           return NextResponse.json(
@@ -94,13 +120,17 @@ export async function PUT(request: Request) {
     }
 
     // Persist to Supabase — authoritative source of truth
-    const updated = await dbUpsertPricing(orgId, sanitized);
-    if (!updated) {
+    const { data: updated, error: dbError } = await dbUpsertPricing(orgId, sanitized);
+    if (dbError || !updated) {
+      console.error('[PRICING PUT ERROR]:', dbError);
       return NextResponse.json(
-        { error: 'Database write failed. Pricing was NOT saved.' },
+        { success: false, error: dbError || 'Database write failed. Pricing was NOT saved.' },
         { status: 500 }
       );
     }
+
+    // Keep store in sync
+    store.updatePricing(orgId, updated as any, adminEmail);
 
     // Audit log
     await dbWriteAuditLog({

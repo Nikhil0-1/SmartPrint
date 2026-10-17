@@ -87,8 +87,15 @@ export function AdminAuthGuard({ children, requiredRole = 'any' }: AdminAuthGuar
             setAuthError('Access denied: Super Admin role required for this area.');
             setFirebaseUser(null);
             setSession(null);
+            if (typeof window !== 'undefined') {
+              localStorage.removeItem('smartprint_admin_token');
+            }
             await signOut(auth);
           } else {
+            const token = await currentUser.getIdToken();
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('smartprint_admin_token', token);
+            }
             setFirebaseUser(currentUser);
             setSession(verified);
             setAuthError('');
@@ -96,12 +103,18 @@ export function AdminAuthGuard({ children, requiredRole = 'any' }: AdminAuthGuar
         } else {
           setFirebaseUser(null);
           setSession(null);
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('smartprint_admin_token');
+          }
           setAuthError('Your account is not authorized as an administrator. Contact platform support.');
           await signOut(auth);
         }
       } else {
         setFirebaseUser(null);
         setSession(null);
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('smartprint_admin_token');
+        }
       }
       setLoading(false);
     });
@@ -138,6 +151,9 @@ export function AdminAuthGuard({ children, requiredRole = 'any' }: AdminAuthGuar
 
   const handleLogout = async () => {
     try {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('smartprint_admin_token');
+      }
       await signOut(auth);
     } catch (e) {
       console.error('[AUTH] Logout error:', e);

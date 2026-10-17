@@ -373,12 +373,24 @@ export async function dbUpdateMemberFirebaseUid(email: string, firebaseUid: stri
 
 // ─── Branding ─────────────────────────────────────────────────────────────────
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CANONICAL_GITAM_ORG_ID = '00000000-0000-0000-0000-000000000001';
+
+async function resolveCanonicalOrgId(orgIdOrSlug: string): Promise<string> {
+  if (!orgIdOrSlug) return CANONICAL_GITAM_ORG_ID;
+  if (UUID_REGEX.test(orgIdOrSlug)) return orgIdOrSlug;
+  const org = await dbGetOrganizationBySlug(orgIdOrSlug);
+  if (org) return org.id;
+  return CANONICAL_GITAM_ORG_ID;
+}
+
 export async function dbGetBranding(organizationId: string): Promise<DbBranding | null> {
   if (!isConfigured()) return null;
+  const canonicalId = await resolveCanonicalOrgId(organizationId);
   const { data, error } = await supabaseAdmin
     .from('branding')
     .select('*')
-    .eq('organization_id', organizationId)
+    .eq('organization_id', canonicalId)
     .single();
   if (error) return null;
   return data;
@@ -387,47 +399,41 @@ export async function dbGetBranding(organizationId: string): Promise<DbBranding 
 export async function dbUpsertBranding(
   organizationId: string,
   updates: Partial<Omit<DbBranding, 'id' | 'created_at'>>
-): Promise<DbBranding | null> {
-  if (!isConfigured()) return null;
-
-  // Check if branding record exists
-  const existing = await dbGetBranding(organizationId);
-  const now = new Date().toISOString();
-
-  if (existing) {
-    const { data, error } = await supabaseAdmin
-      .from('branding')
-      .update({ ...updates, updated_at: now })
-      .eq('organization_id', organizationId)
-      .select()
-      .single();
-    if (error) {
-      console.error('[DB] updateBranding error:', error.message);
-      return null;
-    }
-    return data;
-  } else {
-    const { data, error } = await supabaseAdmin
-      .from('branding')
-      .insert({ ...updates, organization_id: organizationId, created_at: now, updated_at: now })
-      .select()
-      .single();
-    if (error) {
-      console.error('[DB] insertBranding error:', error.message);
-      return null;
-    }
-    return data;
+): Promise<{ data: DbBranding | null; error: string | null }> {
+  if (!isConfigured()) {
+    return { data: null, error: 'Database connection is not configured.' };
   }
+
+  const canonicalId = await resolveCanonicalOrgId(organizationId);
+  const now = new Date().toISOString();
+  const payload = {
+    ...updates,
+    organization_id: canonicalId,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabaseAdmin
+    .from('branding')
+    .upsert(payload, { onConflict: 'organization_id', ignoreDuplicates: false })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('[DB] upsertBranding error:', error.message, error.details);
+    return { data: null, error: `${error.message}${error.details ? ` (${error.details})` : ''}` };
+  }
+  return { data, error: null };
 }
 
 // ─── Pricing ──────────────────────────────────────────────────────────────────
 
 export async function dbGetPricing(organizationId: string): Promise<DbPricing | null> {
   if (!isConfigured()) return null;
+  const canonicalId = await resolveCanonicalOrgId(organizationId);
   const { data, error } = await supabaseAdmin
     .from('pricing')
     .select('*')
-    .eq('organization_id', organizationId)
+    .eq('organization_id', canonicalId)
     .single();
   if (error) return null;
   return data;
@@ -436,12 +442,13 @@ export async function dbGetPricing(organizationId: string): Promise<DbPricing | 
 export async function dbUpsertPricing(
   organizationId: string,
   updates: Partial<Omit<DbPricing, 'id'>>
-): Promise<DbPricing | null> {
+): Promise<{ data: DbPricing | null; error: string | null }> {
   if (!isConfigured()) {
     console.warn('[DB] dbUpsertPricing: Supabase not configured — check env vars.');
-    return null;
+    return { data: null, error: 'Database connection is not configured.' };
   }
 
+  const canonicalId = await resolveCanonicalOrgId(organizationId);
   const now = new Date().toISOString();
 
   // Automatically compute paise values from per-page prices if provided
@@ -458,7 +465,7 @@ export async function dbUpsertPricing(
   const payload = {
     ...updates,
     ...pricePaise,
-    organization_id: organizationId,
+    organization_id: canonicalId,
     updated_at: now,
   };
 
@@ -474,9 +481,9 @@ export async function dbUpsertPricing(
       error.message,
       error.details ?? ''
     );
-    return null;
+    return { data: null, error: `${error.message}${error.details ? ` (${error.details})` : ''}` };
   }
-  return data;
+  return { data, error: null };
 }
 
 // ─── Payment Configurations ───────────────────────────────────────────────────

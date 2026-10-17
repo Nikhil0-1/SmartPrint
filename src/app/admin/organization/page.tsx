@@ -3,5 +3,5 @@
 import AdminPanelPage from '../page';
 
 export default function OrgAdminRoute() {
-  return <AdminPanelPage />;
+  return <AdminPanelPage initialTab="branding" />;
 }

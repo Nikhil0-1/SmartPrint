@@ -48,6 +48,9 @@ export async function POST(request: Request) {
 
       // 5. COMPLETED & IMMEDIATE DOCUMENT PURGE
       store.updateJobStatus(job_id, 'COMPLETED', { cups_job_id: mockCupsId });
+      if (kiosk_id) {
+        store.releaseKioskJob(kiosk_id, job_id);
+      }
       const deleted = await permanentlyDeleteDocument(job_id);
 
       return NextResponse.json({

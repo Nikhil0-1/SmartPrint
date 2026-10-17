@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import {
   LayoutDashboard,
   Monitor,
@@ -72,7 +73,11 @@ function AdminDashboardContent({
   currentUser: CurrentAdmin;
   initialTab?: AdminTab;
 }) {
-  const [activeTab, setActiveTab] = useState<AdminTab>(initialTab);
+  const searchParams = useSearchParams();
+  const slugParam = searchParams.get('slug') || searchParams.get('org') || '';
+  const tabParam = (searchParams.get('tab') as AdminTab) || null;
+
+  const [activeTab, setActiveTab] = useState<AdminTab>(tabParam || initialTab);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [adminData, setAdminData] = useState<any>(null);
@@ -119,7 +124,11 @@ function AdminDashboardContent({
   const fetchAdminData = async () => {
     try {
       const authHeaders = await getAuthHeaders();
-      const res = await fetch('/api/admin/data', {
+      if (!authHeaders.Authorization) {
+        return;
+      }
+      const slugQuery = slugParam ? `?slug=${encodeURIComponent(slugParam)}` : '';
+      const res = await fetch(`/api/admin/data${slugQuery}`, {
         headers: { ...authHeaders },
       });
       const data = await res.json();
@@ -148,7 +157,7 @@ function AdminDashboardContent({
     fetchAdminData();
     const interval = setInterval(fetchAdminData, 6000);
     return () => clearInterval(interval);
-  }, []);
+  }, [slugParam]);
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setNotification({ message, type });
@@ -160,20 +169,27 @@ function AdminDashboardContent({
     e.preventDefault();
     try {
       const authHeaders = await getAuthHeaders();
-      const res = await fetch('/api/pricing', {
+      const slugQuery = slugParam ? `?slug=${encodeURIComponent(slugParam)}` : '';
+      const payload = {
+        ...pricingForm,
+        organization_id: adminData?.current_organization_id || pricingForm.organization_id,
+        slug: slugParam || undefined,
+      };
+      const res = await fetch(`/api/pricing${slugQuery}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...authHeaders,
         },
-        body: JSON.stringify(pricingForm),
+        body: JSON.stringify(payload),
       });
-      if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
         showToast('Pricing configuration updated successfully!');
+        if (data.pricing) setPricingForm(data.pricing);
         fetchAdminData();
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast(err.error || 'Failed to update pricing', 'error');
+        showToast(data.error || 'Failed to update pricing', 'error');
       }
     } catch (err) {
       showToast('Error updating pricing', 'error');
@@ -185,20 +201,27 @@ function AdminDashboardContent({
     e.preventDefault();
     try {
       const authHeaders = await getAuthHeaders();
-      const res = await fetch('/api/branding', {
+      const slugQuery = slugParam ? `?slug=${encodeURIComponent(slugParam)}` : '';
+      const payload = {
+        ...brandingForm,
+        organization_id: adminData?.current_organization_id || brandingForm.organization_id,
+        slug: slugParam || undefined,
+      };
+      const res = await fetch(`/api/branding${slugQuery}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...authHeaders,
         },
-        body: JSON.stringify(brandingForm),
+        body: JSON.stringify(payload),
       });
-      if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
         showToast('Branding settings updated successfully!');
+        if (data.branding) setBrandingForm(data.branding);
         fetchAdminData();
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast(err.error || 'Failed to update branding', 'error');
+        showToast(data.error || 'Failed to update branding', 'error');
       }
     } catch (err) {
       showToast('Error updating branding', 'error');
@@ -1677,8 +1700,10 @@ export default function AdminPanelPage({
   initialTab?: AdminTab;
 }) {
   return (
-    <AdminAuthGuard>
-      {(currentUser) => <AdminDashboardContent currentUser={currentUser} initialTab={initialTab} />}
-    </AdminAuthGuard>
+    <Suspense fallback={<div className="min-h-screen bg-slate-900 flex items-center justify-center text-white text-sm">Loading admin console...</div>}>
+      <AdminAuthGuard>
+        {(currentUser) => <AdminDashboardContent currentUser={currentUser} initialTab={initialTab} />}
+      </AdminAuthGuard>
+    </Suspense>
   );
 }

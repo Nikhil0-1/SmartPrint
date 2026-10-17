@@ -476,7 +476,10 @@ class StateManager {
 
     if (kiosk.active_job_id && kiosk.active_job_id !== jobId) {
       const activeJob = this.jobs.get(kiosk.active_job_id);
-      const isStale = activeJob && (Date.now() - new Date(activeJob.created_at).getTime() > 5 * 60 * 1000);
+      const isStale =
+        !activeJob ||
+        (activeJob.status === 'UPLOAD_COMPLETE' && Date.now() - new Date(activeJob.created_at).getTime() > 45 * 1000) ||
+        Date.now() - new Date(activeJob.created_at).getTime() > 2 * 60 * 1000;
       if (
         activeJob &&
         !isStale &&

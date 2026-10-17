@@ -39,7 +39,7 @@ export default function LandingPage() {
       .then((data) => data.pricing && setPricing(data.pricing))
       .catch(() => {});
 
-    fetch('/api/admin/data')
+    fetch('/api/kiosks')
       .then((res) => res.json())
       .then((data) => data.kiosks && setKiosks(data.kiosks))
       .catch(() => {});

@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { AdminAuthGuard } from '@/components/AdminAuthGuard';
 import { Organization, OrganizationMember } from '@/lib/types';
+import { auth } from '@/lib/firebase';
 
 function SuperAdminContent({ currentUser }: { currentUser: { email: string; role: string; onLogout: () => void } }) {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -37,13 +38,35 @@ function SuperAdminContent({ currentUser }: { currentUser: { email: string; role
   const [formPrimaryColor, setFormPrimaryColor] = useState('#0d253f');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const getAuthHeaders = async (): Promise<Record<string, string>> => {
+    try {
+      const user = auth.currentUser;
+      if (user) {
+        const token = await user.getIdToken();
+        return { Authorization: `Bearer ${token}` };
+      }
+      if (typeof window !== 'undefined') {
+        const stored = localStorage.getItem('smartprint_admin_token');
+        if (stored) return { Authorization: `Bearer ${stored}` };
+      }
+    } catch (e) {
+      console.warn('Failed to get Firebase token:', e);
+    }
+    return {};
+  };
+
   const fetchSuperData = async () => {
     try {
-      const res = await fetch('/api/admin/organizations');
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('/api/admin/organizations', {
+        headers: { ...authHeaders },
+      });
       const data = await res.json();
       if (data.organizations) setOrganizations(data.organizations);
 
-      const dataRes = await fetch('/api/admin/data');
+      const dataRes = await fetch('/api/admin/data', {
+        headers: { ...authHeaders },
+      });
       const fullData = await dataRes.json();
       if (fullData.members) setMembers(fullData.members);
     } catch (e) {
@@ -66,9 +89,13 @@ function SuperAdminContent({ currentUser }: { currentUser: { email: string; role
     e.preventDefault();
     setIsSubmitting(true);
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch('/api/admin/organizations', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
         body: JSON.stringify({
           name: formName,
           slug: formSlug,
@@ -103,9 +130,13 @@ function SuperAdminContent({ currentUser }: { currentUser: { email: string; role
   const handleToggleStatus = async (org: Organization) => {
     const nextStatus = org.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch('/api/admin/organizations', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
         body: JSON.stringify({
           id: org.id,
           status: nextStatus,

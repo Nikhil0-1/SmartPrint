@@ -5,7 +5,7 @@ export const DEFAULT_BRANDING: BrandingConfig = {
   product: 'SMARTPRINT',
   primary_tagline: 'SCAN. UPLOAD. PAY. PRINT.',
   secondary_tagline: 'Smart Campus Printing, Made Simple.',
-  powered_by: 'Nikhil',
+  powered_by: 'Nikhil & Sakshi',
   support_number: '9006496970',
   primary_color: '#0d253f', // Postal-inspired Deep Blue
   secondary_color: '#1e40af', // Royal Blue
