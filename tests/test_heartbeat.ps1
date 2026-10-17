@@ -18,7 +18,7 @@ $response | ConvertTo-Json
 
 Write-Host "`n=== Testing /api/kiosk/poll-jobs ===" -ForegroundColor Cyan
 $pollBody = @{ kiosk_id = "GITAM-SPK-001" } | ConvertTo-Json
-$pollResponse = Invoke-RestMethod -Uri "http://localhost:3000/api/kiosk/poll-jobs" -Method POST -Headers @{"x-kiosk-id" = "GITAM-SPK-001"; "Content-Type" = "application/json"} -Body $pollBody
+$pollResponse = Invoke-RestMethod -Uri "http://localhost:3000/api/kiosk/poll-jobs" -Method POST -Headers $headers -Body $pollBody
 $pollResponse | ConvertTo-Json
 
 Write-Host "`n=== Testing /api/admin/data ===" -ForegroundColor Cyan

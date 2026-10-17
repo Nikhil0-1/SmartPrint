@@ -166,25 +166,8 @@ export interface DbWebhookEvent {
   processed_at: string;
 }
 
-export type PrintJobStatus =
-  | 'CREATED'
-  | 'UPLOAD_COMPLETE'
-  | 'PAYMENT_PENDING'
-  | 'PAYMENT_VERIFIED'
-  | 'QUEUED'
-  | 'DISPATCHED'
-  | 'ACKNOWLEDGED'
-  | 'DOWNLOADING'
-  | 'PROCESSING'
-  | 'SUBMITTED_TO_CUPS'
-  | 'PRINTING'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'RECOVERY_REQUIRED'
-  | 'CANCELLED'
-  | 'PRINTER_OFFLINE'
-  | 'PAYMENT_FAILED'
-  | 'OUTCOME_UNCERTAIN';
+import { PrintJobStatus } from './types';
+export type { PrintJobStatus };
 
 export interface DbPrintJob {
   id: string;

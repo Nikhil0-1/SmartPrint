@@ -1,35 +1,27 @@
 import { NextResponse } from 'next/server';
-import { dbGetKiosk, dbUpdateKioskHeartbeat, dbUpdateDeviceHeartbeat, dbWriteSystemLog } from '@/lib/db';
+import { dbGetKiosk, dbUpdateKioskHeartbeat, dbUpdateDeviceHeartbeat } from '@/lib/db';
 import { supabaseAdmin, isSupabaseConfigured } from '@/lib/supabase';
+import { authenticateDeviceRequest } from '@/lib/deviceAuth';
 
 export async function POST(request: Request) {
   try {
-    const payload = await request.json();
-    const kioskId = request.headers.get('x-kiosk-id') || payload.kiosk_id;
-    const deviceToken = request.headers.get('x-device-token');
-
-    if (!kioskId) {
-      return NextResponse.json({ error: 'Kiosk identification required' }, { status: 401 });
+    // 1. Authoritative Device Authentication
+    const auth = await authenticateDeviceRequest(request);
+    if (!auth.authenticated) {
+      return NextResponse.json({ error: auth.error }, { status: auth.status });
     }
 
-    // Lookup kiosk from Supabase
-    const kiosk = await dbGetKiosk(kioskId);
-    if (!kiosk) {
-      return NextResponse.json({ error: 'Unregistered kiosk device' }, { status: 404 });
+    const { kiosk } = auth;
+    const kioskId = kiosk.id;
+
+    let payload: Record<string, any> = {};
+    try {
+      payload = await request.json();
+    } catch {
+      // Heartbeat body is optional if telemetry is not yet ready
     }
 
-    // Verify device token
-    if (deviceToken && deviceToken !== kiosk.device_token_hash) {
-      await dbWriteSystemLog({
-        level: 'WARNING',
-        component: 'HEARTBEAT',
-        kiosk_id: kioskId,
-        message: `Invalid device token for kiosk ${kioskId}`,
-      });
-      return NextResponse.json({ error: 'Invalid device credentials' }, { status: 403 });
-    }
-
-    // Persist heartbeat to Supabase (kiosk table)
+    // 2. Persist telemetry to Supabase (kiosk table)
     const telemetry: Parameters<typeof dbUpdateKioskHeartbeat>[1] = {
       status: kiosk.maintenance_mode ? 'MAINTENANCE' : 'ONLINE',
     };
@@ -40,7 +32,7 @@ export async function POST(request: Request) {
 
     await dbUpdateKioskHeartbeat(kioskId, telemetry);
 
-    // Also update the associated device record
+    // 3. Update the associated device record
     if (isSupabaseConfigured()) {
       const { data: device } = await supabaseAdmin
         .from('devices')
@@ -53,7 +45,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // Record health metrics snapshot
+    // 4. Record health metrics snapshot
     if (isSupabaseConfigured()) {
       await supabaseAdmin.from('health_metrics').insert({
         kiosk_id: kioskId,
@@ -65,7 +57,7 @@ export async function POST(request: Request) {
       });
     }
 
-    // Re-fetch the kiosk to get fresh maintenance_mode for response
+    // 5. Re-fetch fresh maintenance_mode for agent response
     const refreshed = await dbGetKiosk(kioskId);
 
     return NextResponse.json({

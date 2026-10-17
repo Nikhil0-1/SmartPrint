@@ -77,28 +77,35 @@ export async function POST(request: Request) {
     const initialPaise = pageCount * bwPricePaise;
     const initialAmountRupees = initialPaise / 100;
 
-    // Upload to storage AND persist job in DB in parallel
-    const [uploadResult, dbJob] = await Promise.all([
-      saveTemporaryDocumentMultiTenant(organizationId, sessionId || 'sess_default', jobId, buffer, file.type, file.name),
-      dbCreatePrintJob({
-        id: jobId,
-        organization_id: organizationId,
-        session_id: sessionId || null,
-        kiosk_id: kioskId,
-        pages_total: pageCount,
-        pages_selected: 'All',
-        copies: 1,
-        is_color: false,
-        is_duplex: false,
-        orientation: 'portrait',
-        paper_size: 'A4',
-        calculated_amount: initialAmountRupees,
-        amount_paise: initialPaise,
-        idempotency_key: idempotencyKey,
-        document_name: file.name,
-        status: 'UPLOAD_COMPLETE',
-      }),
-    ]);
+    // Upload to storage and persist job in DB with storage path
+    const uploadResult = await saveTemporaryDocumentMultiTenant(
+      organizationId,
+      sessionId || 'sess_default',
+      jobId,
+      buffer,
+      file.type,
+      file.name
+    );
+
+    const dbJob = await dbCreatePrintJob({
+      id: jobId,
+      organization_id: organizationId,
+      session_id: sessionId || null,
+      kiosk_id: kioskId,
+      pages_total: pageCount,
+      pages_selected: 'All',
+      copies: 1,
+      is_color: false,
+      is_duplex: false,
+      orientation: 'portrait',
+      paper_size: 'A4',
+      calculated_amount: initialAmountRupees,
+      amount_paise: initialPaise,
+      idempotency_key: idempotencyKey,
+      document_name: file.name,
+      file_storage_path: uploadResult.objectKey,
+      status: 'UPLOAD_COMPLETE',
+    });
 
     // Register in in-memory store for local fallback
     store.registerFile(jobId, file.name, file.type, file.size, pageCount, uploadResult.objectKey, organizationId);

@@ -1,6 +1,8 @@
 import { PDFDocument } from 'pdf-lib';
 import { store } from './store';
 import { storageService, TemporaryUploadResult } from './storage';
+import { dbGetPrintJob } from './db';
+import { supabaseAdmin, isSupabaseConfigured } from './supabase';
 
 // Allowed MIME types strictly adhering to Section 8.1
 const ALLOWED_MIME_TYPES = new Set([
@@ -114,34 +116,69 @@ export async function saveTemporaryDocument(
 }
 
 export async function getTemporaryDocument(jobId: string): Promise<Buffer | null> {
-  const job = store.getJob(jobId);
-  const objectKey = job?.storage_object_key;
+  const dbJob = await dbGetPrintJob(jobId);
+  const storeJob = store.getJob(jobId);
+
+  const objectKey = dbJob?.file_storage_path || storeJob?.storage_object_key;
   if (objectKey) {
-    return storageService.getTemporaryDocument(objectKey);
+    const buffer = await storageService.getTemporaryDocument(objectKey);
+    if (buffer) return buffer;
   }
+
   // Try fallback key pattern
-  const orgId = job?.organization_id || '00000000-0000-0000-0000-000000000001';
-  const sessId = job?.session_id || 'sess_default';
-  const fallbackKey = `${orgId}/${sessId}/${jobId}_${job?.original_filename || 'document.pdf'}`;
+  const orgId = dbJob?.organization_id || storeJob?.organization_id || '00000000-0000-0000-0000-000000000001';
+  const sessId = dbJob?.session_id || storeJob?.session_id || 'sess_default';
+  const docName = dbJob?.document_name || storeJob?.original_filename || 'document.pdf';
+  const fallbackKey = `${orgId}/${sessId}/${jobId}_${docName}`;
   return storageService.getTemporaryDocument(fallbackKey);
 }
 
-export async function permanentlyDeleteDocument(jobId: string): Promise<boolean> {
-  const job = store.getJob(jobId);
+export async function permanentlyDeleteDocument(
+  jobId: string,
+  knownJob?: { file_storage_path?: string | null; organization_id?: string; session_id?: string | null; document_name?: string | null } | null
+): Promise<boolean> {
+  const dbJob = knownJob !== undefined ? knownJob : await dbGetPrintJob(jobId);
+  const storeJob = store.getJob(jobId);
   let success = false;
 
-  if (job?.storage_object_key) {
-    success = await storageService.deleteTemporaryDocument(job.storage_object_key);
+  const objectKey = dbJob?.file_storage_path || storeJob?.storage_object_key;
+  if (objectKey) {
+    success = await storageService.deleteTemporaryDocument(objectKey);
   } else {
     // Check fallback keys
-    const orgId = job?.organization_id || '00000000-0000-0000-0000-000000000001';
-    const sessId = job?.session_id || 'sess_default';
-    const fallbackKey = `${orgId}/${sessId}/${jobId}_${job?.original_filename || 'document.pdf'}`;
+    const orgId = dbJob?.organization_id || storeJob?.organization_id || '00000000-0000-0000-0000-000000000001';
+    const sessId = dbJob?.session_id || storeJob?.session_id || 'sess_default';
+    const docName = dbJob?.document_name || storeJob?.original_filename || 'document.pdf';
+    const fallbackKey = `${orgId}/${sessId}/${jobId}_${docName}`;
     success = await storageService.deleteTemporaryDocument(fallbackKey);
   }
 
   // Mark in store metadata that file has been permanently purged
   store.deleteJobFile(jobId);
+
+  // Clear storage references in Supabase in parallel
+  if (isSupabaseConfigured()) {
+    try {
+      await Promise.all([
+        supabaseAdmin
+          .from('print_jobs')
+          .update({
+            file_storage_path: null,
+            file_url: null,
+          })
+          .eq('id', jobId),
+        supabaseAdmin
+          .from('files')
+          .update({
+            deleted_at: new Date().toISOString(),
+            status: 'DELETED',
+          })
+          .eq('job_id', jobId),
+      ]);
+    } catch (err) {
+      console.error('[CLEANUP] Failed to nullify storage references in database:', err);
+    }
+  }
 
   store.logSystem('INFO', 'CLEANUP', `CLEANUP_VERIFIED: Ephemeral document permanently purged for job ${jobId}`, {
     job_id: jobId,

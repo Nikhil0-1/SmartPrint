@@ -1,42 +1,26 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
-import { dbClaimNextPrintJob, dbGetKiosk, dbGetPrinter } from '@/lib/db';
+import { dbClaimNextPrintJob, dbGetPrinter } from '@/lib/db';
+import { isSupabaseConfigured } from '@/lib/supabase';
+import { authenticateDeviceRequest } from '@/lib/deviceAuth';
 
 export async function POST(request: Request) {
   try {
-    const headerKioskId = request.headers.get('x-kiosk-id');
-    const headerDeviceToken = request.headers.get('x-device-token');
-
-    let kioskId = headerKioskId;
-    let deviceToken = headerDeviceToken;
-
-    try {
-      const body = await request.json();
-      if (!kioskId) kioskId = body.kiosk_id;
-      if (!deviceToken) deviceToken = body.device_token;
-    } catch {
-      // Body may be empty if headers are provided
+    // 1. Authoritative Device Authentication
+    const auth = await authenticateDeviceRequest(request);
+    if (!auth.authenticated) {
+      return NextResponse.json({ error: auth.error }, { status: auth.status });
     }
 
-    if (!kioskId) {
-      return NextResponse.json({ error: 'Kiosk identification required' }, { status: 401 });
+    const { kiosk } = auth;
+    const kioskId = kiosk.id;
+
+    // 2. Check Maintenance Mode
+    if (kiosk.maintenance_mode || kiosk.status === 'MAINTENANCE') {
+      return NextResponse.json({ success: true, jobs: [], maintenance_mode: true });
     }
 
-    // 1. Authoritative Kiosk check
-    const dbKiosk = await dbGetKiosk(kioskId);
-    const storeKiosk = store.getKiosk(kioskId);
-
-    if (!dbKiosk && !storeKiosk) {
-      return NextResponse.json({ error: 'Unregistered kiosk' }, { status: 404 });
-    }
-
-    const isMaintenance = dbKiosk?.maintenance_mode ?? storeKiosk?.maintenance_mode ?? false;
-    if (isMaintenance) {
-      return NextResponse.json({ jobs: [], maintenance_mode: true });
-    }
-
-    // 2. ATOMIC FIFO QUEUE CLAIMING
-    // Claims oldest eligible job with an exclusive worker lease
+    // 3. ATOMIC FIFO QUEUE CLAIMING FROM DATABASE
     const workerId = `worker_${kioskId}_${Date.now()}`;
     const claimedJob = await dbClaimNextPrintJob(kioskId, workerId, 90);
 
@@ -65,7 +49,7 @@ export async function POST(request: Request) {
         orientation: claimedJob.orientation,
         paper_size: claimedJob.paper_size,
         status: 'DISPATCHED',
-        signed_download_url: `/api/kiosk/download/${claimedJob.id}?token=${claimedJob.idempotency_key}`,
+        signed_download_url: `/api/kiosk/download/${claimedJob.id}`,
       };
 
       return NextResponse.json({
@@ -74,13 +58,23 @@ export async function POST(request: Request) {
       });
     }
 
-    // 3. Fallback to in-memory store pending jobs if no DB job was claimed
+    // 4. In production with Supabase configured, authoritative store returns empty queue.
+    // In-memory demo store is never permitted to serve mock jobs to production devices.
+    if (isSupabaseConfigured()) {
+      return NextResponse.json({
+        success: true,
+        jobs: [],
+      });
+    }
+
+    // 5. Offline unit-testing fallback only when Supabase is not configured
     const pendingJobs = store.getPendingJobsForKiosk(kioskId);
     return NextResponse.json({
       success: true,
       jobs: pendingJobs,
     });
   } catch (error) {
+    console.error('[POLL-JOBS ERROR]:', error);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }

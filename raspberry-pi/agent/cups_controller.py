@@ -199,15 +199,47 @@ class CupsController:
         start_time = time.time()
 
         while time.time() - start_time < timeout_seconds:
-            # Check if job is still in active queue
+            # 1. Pycups verification if available
+            if HAS_PYCUPS and self.conn:
+                try:
+                    jobs = self.conn.getJobs(which_jobs='all')
+                    if cups_job_id in jobs:
+                        state = jobs[cups_job_id].get('job-state', 0)
+                        # IPP_JOB_COMPLETED = 9
+                        if state == 9:
+                            logging.info(f"CUPS Job {cups_job_id} confirmed completed.")
+                            return True, "Job completed"
+                        # IPP_JOB_CANCELED = 8, IPP_JOB_ABORTED = 7
+                        elif state in (7, 8):
+                            logging.error(f"CUPS Job {cups_job_id} failed with state {state}")
+                            return False, f"Job terminated with error state {state}"
+                    elif cups_job_id not in self.conn.getJobs(which_jobs='not-completed'):
+                        logging.info(f"CUPS Job {cups_job_id} no longer in active queue; confirmed completed.")
+                        return True, "Job completed"
+                except Exception as e:
+                    logging.warning(f"Error querying pycups job state: {e}")
+
+            # 2. Subprocess CLI fallback
             try:
                 cmd = ["lpstat", "-o", target_queue]
                 out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
                 
                 job_key = f"{target_queue}-{cups_job_id}"
                 if job_key not in out and str(cups_job_id) not in out:
-                    # Job no longer in active queue -> completed!
-                    logging.info(f"CUPS Job {cups_job_id} completed successfully.")
+                    # Verify in completed jobs history
+                    try:
+                        completed_out = subprocess.check_output(
+                            ["lpstat", "-W", "completed", "-o", target_queue],
+                            text=True,
+                            stderr=subprocess.DEVNULL
+                        )
+                        if str(cups_job_id) in completed_out:
+                            logging.info(f"CUPS Job {cups_job_id} verified in completed job history.")
+                            return True, "Job completed"
+                    except Exception:
+                        pass
+
+                    logging.info(f"CUPS Job {cups_job_id} cleared from queue.")
                     return True, "Job completed"
 
             except subprocess.CalledProcessError:

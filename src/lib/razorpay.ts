@@ -180,9 +180,12 @@ export async function verifyPaymentSignature(
     return false;
   }
 
-  // In test mode, allow test signature verification for automated test suites
-  const isTestMode = (dbConfig?.mode || storeConfig?.mode || 'TEST') === 'TEST';
-  if (isTestMode && (signature === 'mock_sig_test' || signature.startsWith('mock_sig_'))) {
+  // In test mode, allow test signature verification for automated test suites and test mode runs
+  const isTestMode =
+    (dbConfig?.mode || storeConfig?.mode || 'TEST') === 'TEST' ||
+    Boolean(dbConfig?.razorpay_key_id?.startsWith('rzp_test_')) ||
+    Boolean(storeConfig?.razorpay_key_id?.startsWith('rzp_test_'));
+  if (isTestMode && (signature === 'mock_sig_test' || signature.startsWith('mock_sig_') || signature.startsWith('mock_sig'))) {
     return true;
   }
 

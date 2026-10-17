@@ -48,18 +48,18 @@ usermod -a -G lp "$TARGET_USER" || true
 systemctl enable cups
 systemctl restart cups
 
-# Enable CUPS remote web admin on port 631 for local maintenance if needed
-cupsctl --remote-admin --remote-any || true
+# Configure CUPS for secure local operation (no broad remote admin)
+cupsctl --no-remote-admin --no-remote-any || true
 
 echo "[4/8] Creating secure directories with restricted permissions..."
 mkdir -p /var/lib/smartprint/jobs
 mkdir -p /etc/smartprint
 mkdir -p /var/log/smartprint
 
-# Owner root:lpadmin, restricted chmod 700 to protect customer documents
+# Restricted permissions to protect customer documents and credentials
 chmod 700 /var/lib/smartprint/jobs
-chmod 755 /var/lib/smartprint
-chmod 755 /etc/smartprint
+chmod 700 /var/lib/smartprint
+chmod 700 /etc/smartprint
 chmod 755 /var/log/smartprint
 
 echo "[5/8] Verifying Python dependencies..."
@@ -68,18 +68,12 @@ python3 -c "import cups, requests, urllib3; print('[+] Python dependencies verif
   python3 -m pip install --break-system-packages pycups requests urllib3 || pip3 install pycups requests urllib3 || true
 }
 
-echo "[6/8] Generating Default Kiosk Configuration (/etc/smartprint/agent_config.json)..."
+echo "[6/8] Checking Kiosk Registration..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ ! -f /etc/smartprint/agent_config.json ]; then
-  cat <<EOF > /etc/smartprint/agent_config.json
-{
-  "backend_url": "https://smart-prints.vercel.app",
-  "kiosk_id": "GITAM-SPK-001",
-  "device_token": "gitam_spk_001_secure_device_secret_2026",
-  "poll_interval_sec": 4,
-  "heartbeat_interval_sec": 10
-}
-EOF
-  echo "[+] Config file created at /etc/smartprint/agent_config.json"
+  echo "[*] Device configuration not found. Run 'sudo bash $SCRIPT_DIR/register_device.sh' to authenticate and register this kiosk."
+else
+  echo "[+] Existing device configuration found at /etc/smartprint/agent_config.json"
 fi
 
 echo "[7/8] Installing Systemd Services..."

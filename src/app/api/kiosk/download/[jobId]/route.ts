@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
-import { dbGetPrintJob, dbGetKiosk } from '@/lib/db';
+import { dbGetPrintJob } from '@/lib/db';
+import { isSupabaseConfigured } from '@/lib/supabase';
+import { authenticateDeviceRequest, validateJobScope } from '@/lib/deviceAuth';
 import { getTemporaryDocument } from '@/lib/fileSecurity';
 
 export async function GET(
@@ -8,58 +10,43 @@ export async function GET(
   { params }: { params: Promise<{ jobId: string }> }
 ) {
   try {
+    // 1. Authoritative Device Authentication
+    // Strictly requires X-Kiosk-Id and X-Device-Token headers.
+    const auth = await authenticateDeviceRequest(request);
+    if (!auth.authenticated) {
+      return new NextResponse(auth.error, { status: auth.status });
+    }
+
     const { jobId } = await params;
-    const { searchParams } = new URL(request.url);
-    const token = searchParams.get('token');
+    if (!jobId) {
+      return new NextResponse('Job ID is required', { status: 400 });
+    }
 
-    // 1. Authoritative DB job lookup with store fallback
-    const dbJob = await dbGetPrintJob(jobId);
-    const storeJob = store.getJob(jobId);
+    // 2. Fetch Authoritative Job Record
+    let job = await dbGetPrintJob(jobId);
+    if (!job && !isSupabaseConfigured()) {
+      job = store.getJob(jobId) as any;
+    }
 
-    const job = dbJob || storeJob;
     if (!job) {
       return new NextResponse('Job not found or document expired', { status: 404 });
     }
 
-    // 2. Reject immediately if document was already purged (HTTP 410 Gone)
+    // 3. Scope job to authenticated kiosk and organization
+    const scopeCheck = validateJobScope(job, auth.kiosk);
+    if (!scopeCheck.authorized) {
+      return new NextResponse(scopeCheck.error || 'Forbidden', { status: scopeCheck.status || 403 });
+    }
+
+    // 4. Reject immediately if document was already purged (HTTP 410 Gone)
     if (job.status === 'COMPLETED' || job.status === 'FAILED') {
       return new NextResponse('Document has already been purged', { status: 410 });
     }
 
-    // 3. Token or Device Header authorization
-    const deviceTokenHeader = request.headers.get('x-device-token');
-    const kioskIdHeader = request.headers.get('x-kiosk-id');
-
-    let authorized = false;
-
-    // Token must match the job's idempotency_key
-    if (token && token === job.idempotency_key) {
-      authorized = true;
-    } else if (kioskIdHeader && kioskIdHeader === job.kiosk_id) {
-      // Validate device token against DB kiosk record first, then store fallback
-      const dbKiosk = await dbGetKiosk(job.kiosk_id);
-      if (dbKiosk && deviceTokenHeader) {
-        // Compare against hashed token stored in DB
-        authorized = deviceTokenHeader === dbKiosk.device_token_hash;
-      }
-
-      if (!authorized) {
-        const storeKiosk = store.getKiosk(job.kiosk_id);
-        if (storeKiosk && deviceTokenHeader === storeKiosk.device_token_hash) {
-          authorized = true;
-        }
-      }
-    } else if (!token && process.env.NODE_ENV !== 'production') {
-      authorized = true;
-    }
-
-    if (!authorized) {
-      return new NextResponse('Unauthorized device or token for this print job', { status: 403 });
-    }
-
+    // 5. Retrieve ephemeral file
     const docBuffer = await getTemporaryDocument(jobId);
     if (!docBuffer) {
-      return new NextResponse('Temporary document unavailable or deleted', { status: 404 });
+      return new NextResponse('Temporary document unavailable or deleted', { status: 410 });
     }
 
     const filename = ('document_name' in job && job.document_name)
@@ -85,6 +72,7 @@ export async function GET(
       },
     });
   } catch (error) {
+    console.error('[DOWNLOAD ERROR]:', error);
     return new NextResponse((error as Error).message, { status: 500 });
   }
 }

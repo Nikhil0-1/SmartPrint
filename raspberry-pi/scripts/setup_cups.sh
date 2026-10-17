@@ -60,9 +60,8 @@ usermod -a -G lpadmin "$CUPS_USER" 2>/dev/null && log "Added $CUPS_USER to lpadm
 
 # --- 4. Configure CUPS to allow local admin and network access ---
 log "[4/6] Configuring CUPS admin access..."
-cupsctl --no-remote-admin --no-remote-any 2>/dev/null || true
-cupsctl --share-printers 2>/dev/null || true
-log "CUPS configured for local operation."
+cupsctl --no-remote-admin --no-remote-any --no-share-printers 2>/dev/null || true
+log "CUPS configured securely for local operation only."
 
 # --- 5. Detect USB printers ---
 log "[5/6] Detecting USB printers via lpinfo..."

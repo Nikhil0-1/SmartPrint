@@ -1,0 +1,84 @@
+import { PrintJobStatus } from './types';
+
+/**
+ * Authoritative State Transition Graph for Print Jobs.
+ * Defines strictly allowed state transitions to prevent invalid or out-of-order jumps.
+ */
+export const ALLOWED_STATUS_TRANSITIONS: Record<PrintJobStatus, readonly PrintJobStatus[]> = {
+  CREATED: ['UPLOAD_COMPLETE', 'VALIDATING', 'CANCELLED', 'EXPIRED', 'FAILED'],
+  UPLOAD_COMPLETE: ['VALIDATING', 'PAYMENT_PENDING', 'CANCELLED', 'EXPIRED', 'FAILED'],
+  VALIDATING: ['PAYMENT_PENDING', 'FAILED', 'CANCELLED'],
+  PAYMENT_PENDING: ['PAYMENT_VERIFIED', 'QUEUED', 'FAILED', 'EXPIRED', 'CANCELLED'],
+  PAYMENT_VERIFIED: ['QUEUED', 'DISPATCHED', 'DEVICE_ACCEPTED', 'DOWNLOADING', 'CANCELLED', 'REFUND_PENDING', 'FAILED'],
+  QUEUED: ['DISPATCHED', 'DEVICE_ACCEPTED', 'ACKNOWLEDGED', 'DOWNLOADING', 'CANCELLED', 'FAILED', 'RECOVERY_REQUIRED'],
+  DISPATCHED: ['ACKNOWLEDGED', 'DEVICE_ACCEPTED', 'DOWNLOADING', 'PROCESSING', 'FAILED', 'RECOVERY_REQUIRED', 'OUTCOME_UNCERTAIN'],
+  DEVICE_ACCEPTED: ['ACKNOWLEDGED', 'DOWNLOADING', 'PROCESSING', 'FAILED', 'RECOVERY_REQUIRED'],
+  ACKNOWLEDGED: ['DOWNLOADING', 'PROCESSING', 'SUBMITTED_TO_CUPS', 'FAILED', 'RECOVERY_REQUIRED'],
+  DOWNLOADING: ['PROCESSING', 'SUBMITTED_TO_CUPS', 'FAILED', 'RECOVERY_REQUIRED'],
+  PROCESSING: ['SUBMITTED_TO_CUPS', 'PRINTING', 'FAILED', 'RECOVERY_REQUIRED', 'OUTCOME_UNCERTAIN'],
+  SUBMITTED_TO_CUPS: [
+    'PRINTING',
+    'PRINTED',
+    'PRINT_COMPLETION_REPORTED',
+    'COMPLETED',
+    'FAILED',
+    'RECOVERY_REQUIRED',
+    'OUTCOME_UNCERTAIN',
+  ],
+  PRINTING: [
+    'PRINTED',
+    'PRINT_COMPLETION_REPORTED',
+    'CLEANUP_PENDING',
+    'COMPLETED',
+    'FAILED',
+    'RECOVERY_REQUIRED',
+    'OUTCOME_UNCERTAIN',
+  ],
+  PRINTED: ['PRINT_COMPLETION_REPORTED', 'CLEANUP_PENDING', 'COMPLETED', 'FAILED'],
+  PRINT_COMPLETION_REPORTED: ['CLEANUP_PENDING', 'COMPLETED', 'FAILED'],
+  CLEANUP_PENDING: ['COMPLETED', 'FAILED'],
+  COMPLETED: ['COMPLETED'], // Idempotent
+  FAILED: ['FAILED', 'REFUND_PENDING', 'REFUNDED'],
+  RECOVERY_REQUIRED: ['QUEUED', 'FAILED', 'REFUND_PENDING', 'CANCELLED', 'OUTCOME_UNCERTAIN'],
+  OUTCOME_UNCERTAIN: ['RECOVERY_REQUIRED', 'FAILED', 'COMPLETED'],
+  CANCELLED: ['CANCELLED', 'REFUND_PENDING'],
+  EXPIRED: ['EXPIRED', 'CANCELLED'],
+  REFUND_PENDING: ['REFUNDED', 'FAILED'],
+  REFUNDED: ['REFUNDED'],
+  DEVICE_OFFLINE: ['QUEUED', 'FAILED', 'RECOVERY_REQUIRED'],
+  PRINTER_OFFLINE: ['QUEUED', 'FAILED', 'RECOVERY_REQUIRED'],
+  PRINTER_UNAVAILABLE: ['QUEUED', 'FAILED', 'RECOVERY_REQUIRED'],
+  DRIVER_UNAVAILABLE: ['QUEUED', 'FAILED', 'RECOVERY_REQUIRED'],
+  PAYMENT_FAILED: ['PAYMENT_PENDING', 'CANCELLED', 'FAILED'],
+};
+
+/**
+ * Validates whether a proposed status transition is legal.
+ * Idempotent transitions (status unchanged) are always permitted.
+ */
+export function isValidStatusTransition(
+  currentStatus: PrintJobStatus,
+  targetStatus: PrintJobStatus
+): boolean {
+  if (currentStatus === targetStatus) return true;
+  const allowed = ALLOWED_STATUS_TRANSITIONS[currentStatus];
+  if (!allowed) return false;
+  return allowed.includes(targetStatus);
+}
+
+/**
+ * Checks if the current status represents an active printing phase
+ * from which a verified COMPLETED transition is allowed.
+ */
+export function isValidCompletionPrecondition(currentStatus: PrintJobStatus): boolean {
+  return [
+    'PRINTING',
+    'SUBMITTED_TO_CUPS',
+    'PRINTED',
+    'PRINT_COMPLETION_REPORTED',
+    'CLEANUP_PENDING',
+    'DISPATCHED',
+    'PROCESSING',
+    'OUTCOME_UNCERTAIN',
+  ].includes(currentStatus);
+}

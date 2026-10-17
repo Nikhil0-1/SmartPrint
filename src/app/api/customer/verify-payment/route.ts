@@ -91,6 +91,7 @@ export async function POST(request: Request) {
     // Atomically enqueue print job into the physical printer's FIFO queue
     const queuedJob = await dbEnqueuePrintJob(effectiveJobId, dbJob?.printer_id || undefined);
     store.updateJobStatus(effectiveJobId, 'QUEUED');
+    store.releaseKioskJob(dbJob?.kiosk_id || 'GITAM-SPK-001', effectiveJobId);
 
     // 5. Get deterministic queue position for customer feedback
     const queueInfo = await dbGetJobQueuePosition(effectiveJobId);
