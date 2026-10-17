@@ -7,14 +7,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Run as the desktop user (pi or your actual username — change if different)
-User=pi
-Group=pi
+# Run as the desktop user (smartprint on Raspberry Pi 4)
+User=smartprint
+Group=smartprint
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
+Environment=XAUTHORITY=/home/smartprint/.Xauthority
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-# Pass the real deployed URL — update SMARTPRINT_BACKEND_URL to your cloud URL
-Environment=KIOSK_URL=http://localhost:3000/kiosk/GITAM-SPK-001
+# Deployed Vercel production kiosk URL
+Environment=KIOSK_URL=https://smart-prints.vercel.app/kiosk/GITAM-SPK-001
 ExecStartPre=/bin/sleep 5
 ExecStart=/bin/bash /opt/smartprint/raspberry-pi/scripts/kiosk_setup.sh
 Restart=always
@@ -25,3 +25,4 @@ KillSignal=SIGTERM
 
 [Install]
 WantedBy=graphical-session.target
+

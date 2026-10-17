@@ -34,7 +34,7 @@ CONFIG_FILE = os.getenv("SMARTPRINT_CONFIG", "/etc/smartprint/agent_config.json"
 LOCAL_STATE_DB = "/var/lib/smartprint/agent_state.db"
 TEMP_JOBS_DIR = "/var/lib/smartprint/jobs"
 
-DEFAULT_BACKEND_URL = os.getenv("SMARTPRINT_BACKEND_URL", "http://localhost:3001")
+DEFAULT_BACKEND_URL = os.getenv("SMARTPRINT_BACKEND_URL", "https://smart-prints.vercel.app")
 DEFAULT_KIOSK_ID = os.getenv("SMARTPRINT_KIOSK_ID", "GITAM-SPK-001")
 DEFAULT_DEVICE_TOKEN = os.getenv("SMARTPRINT_DEVICE_TOKEN", "gitam_spk_001_secure_device_secret_2026")
 

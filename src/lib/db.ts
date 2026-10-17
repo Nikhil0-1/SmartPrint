@@ -134,6 +134,18 @@ export interface DbPrinter {
   updated_at: string;
 }
 
+export interface DbPrinterRouting {
+  id?: string;
+  kiosk_id: string;
+  bw_primary_printer_id?: string | null;
+  bw_backup_printer_id?: string | null;
+  color_primary_printer_id?: string | null;
+  color_backup_printer_id?: string | null;
+  auto_backup_enabled?: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface DbAuditLog {
   id: string;
   admin_email: string;
@@ -691,6 +703,60 @@ export async function dbUpdatePrinter(id: string, updates: Partial<DbPrinter>): 
     .single();
   if (error) {
     console.error('[DB] updatePrinter error:', error.message);
+    return null;
+  }
+  return data;
+}
+
+// ─── Printer Routing ─────────────────────────────────────────────────────────
+
+export async function dbGetRoutings(kioskIds?: string[]): Promise<DbPrinterRouting[]> {
+  if (!isConfigured()) return [];
+  let query = supabaseAdmin.from('printer_routing').select('*');
+  if (kioskIds && kioskIds.length > 0) {
+    query = query.in('kiosk_id', kioskIds);
+  }
+  const { data, error } = await query;
+  if (error) {
+    console.error('[DB] getRoutings error:', error.message);
+    return [];
+  }
+  return data || [];
+}
+
+export async function dbGetRouting(kioskId: string): Promise<DbPrinterRouting | null> {
+  if (!isConfigured()) return null;
+  const { data, error } = await supabaseAdmin
+    .from('printer_routing')
+    .select('*')
+    .eq('kiosk_id', kioskId)
+    .single();
+  if (error) return null;
+  return data;
+}
+
+export async function dbUpsertRouting(
+  kioskId: string,
+  routing: Partial<DbPrinterRouting>
+): Promise<DbPrinterRouting | null> {
+  if (!isConfigured()) return null;
+  const payload: Record<string, unknown> = {
+    kiosk_id: kioskId,
+    updated_at: new Date().toISOString(),
+  };
+  if (routing.bw_primary_printer_id !== undefined) payload.bw_primary_printer_id = routing.bw_primary_printer_id;
+  if (routing.bw_backup_printer_id !== undefined) payload.bw_backup_printer_id = routing.bw_backup_printer_id;
+  if (routing.color_primary_printer_id !== undefined) payload.color_primary_printer_id = routing.color_primary_printer_id;
+  if (routing.color_backup_printer_id !== undefined) payload.color_backup_printer_id = routing.color_backup_printer_id;
+  if (routing.auto_backup_enabled !== undefined) payload.auto_backup_enabled = routing.auto_backup_enabled;
+
+  const { data, error } = await supabaseAdmin
+    .from('printer_routing')
+    .upsert(payload, { onConflict: 'kiosk_id' })
+    .select()
+    .single();
+  if (error) {
+    console.error('[DB] upsertRouting error:', error.message);
     return null;
   }
   return data;

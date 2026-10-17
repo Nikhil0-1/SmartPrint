@@ -8,7 +8,7 @@
 
 set -o pipefail
 
-KIOSK_URL="${KIOSK_URL:-${1:-"http://localhost:3000/kiosk/GITAM-SPK-001"}}"
+KIOSK_URL="${KIOSK_URL:-${1:-"https://smart-prints.vercel.app/kiosk/GITAM-SPK-001"}}"
 LOG_FILE="/var/log/smartprint/kiosk.log"
 CRASH_RESTORE_FILE="${HOME}/.config/chromium/Default/Preferences"
 

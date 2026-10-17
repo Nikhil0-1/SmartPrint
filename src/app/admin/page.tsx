@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import {
@@ -83,6 +83,9 @@ function AdminDashboardContent({
   const [adminData, setAdminData] = useState<any>(null);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
+  const initialLoadDone = useRef(false);
+  const lastSaveTimeRef = useRef(0);
+
   // Form states for editable sections
   const [pricingForm, setPricingForm] = useState(DEFAULT_PRICING);
   const [brandingForm, setBrandingForm] = useState(DEFAULT_BRANDING);
@@ -134,17 +137,21 @@ function AdminDashboardContent({
       const data = await res.json();
       if (res.ok && data) {
         setAdminData(data);
-        if (data.pricing) setPricingForm(data.pricing);
-        if (data.branding) setBrandingForm(data.branding);
-        if (data.payment_config) {
-          setPaymentConfigForm((prev) => ({
-            ...prev,
-            mode: data.payment_config.mode || 'TEST',
-            razorpay_key_id: data.payment_config.razorpay_key_id || '',
-            status: data.payment_config.status || 'NOT_CONFIGURED',
-            verified_at: data.payment_config.verified_at || null,
-          }));
+        const recentlySaved = Date.now() - lastSaveTimeRef.current < 12000;
+        if (!initialLoadDone.current || !recentlySaved) {
+          if (data.pricing) setPricingForm(data.pricing);
+          if (data.branding) setBrandingForm(data.branding);
+          if (data.payment_config) {
+            setPaymentConfigForm((prev) => ({
+              ...prev,
+              mode: data.payment_config.mode || 'TEST',
+              razorpay_key_id: data.payment_config.razorpay_key_id || '',
+              status: data.payment_config.status || 'NOT_CONFIGURED',
+              verified_at: data.payment_config.verified_at || null,
+            }));
+          }
         }
+        initialLoadDone.current = true;
       }
     } catch (err) {
       console.error('Failed to load admin data:', err);
@@ -185,8 +192,12 @@ function AdminDashboardContent({
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
+        lastSaveTimeRef.current = Date.now();
         showToast('Pricing configuration updated successfully!');
-        if (data.pricing) setPricingForm(data.pricing);
+        if (data.pricing) {
+          setPricingForm(data.pricing);
+          setAdminData((prev: any) => (prev ? { ...prev, pricing: data.pricing } : prev));
+        }
         fetchAdminData();
       } else {
         showToast(data.error || 'Failed to update pricing', 'error');
@@ -217,8 +228,12 @@ function AdminDashboardContent({
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
+        lastSaveTimeRef.current = Date.now();
         showToast('Branding settings updated successfully!');
-        if (data.branding) setBrandingForm(data.branding);
+        if (data.branding) {
+          setBrandingForm(data.branding);
+          setAdminData((prev: any) => (prev ? { ...prev, branding: data.branding } : prev));
+        }
         fetchAdminData();
       } else {
         showToast(data.error || 'Failed to update branding', 'error');
@@ -244,6 +259,7 @@ function AdminDashboardContent({
       });
       const data = await res.json();
       if (res.ok && data.success) {
+        lastSaveTimeRef.current = Date.now();
         showToast('Razorpay Payment Gateway settings saved!');
         if (data.config) {
           setPaymentConfigForm((prev) => ({
@@ -251,6 +267,7 @@ function AdminDashboardContent({
             status: data.config.status,
             verified_at: data.config.verified_at,
           }));
+          setAdminData((prev: any) => (prev ? { ...prev, payment_config: data.config } : prev));
         }
         fetchAdminData();
       } else {
@@ -863,7 +880,18 @@ function AdminDashboardContent({
                       });
                       const resData = await res.json();
                       if (res.ok && resData.success) {
+                        lastSaveTimeRef.current = Date.now();
                         showToast(`Routing updated for ${kiosk.id}`);
+                        const savedRoute = resData.routing || { kiosk_id: kiosk.id, ...currentRoute, ...updatedFields };
+                        setAdminData((prev: any) => {
+                          if (!prev) return prev;
+                          const existingRoutings = prev.routings || [];
+                          const idx = existingRoutings.findIndex((r: any) => r.kiosk_id === kiosk.id);
+                          const updated = idx >= 0
+                            ? [...existingRoutings.slice(0, idx), savedRoute, ...existingRoutings.slice(idx + 1)]
+                            : [...existingRoutings, savedRoute];
+                          return { ...prev, routings: updated };
+                        });
                         fetchAdminData();
                       } else {
                         showToast(resData.error || 'Failed updating routing', 'error');

@@ -20,7 +20,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-BACKEND_URL="${1:-http://localhost:3000}"
+BACKEND_URL="${1:-https://smart-prints.vercel.app}"
 ORG_ID="${2:-00000000-0000-0000-0000-000000000001}"
 KIOSK_ID="${3:-GITAM-SPK-001}"
 DEVICE_TOKEN="${4:-gitam_spk_001_secure_device_secret_2026}"

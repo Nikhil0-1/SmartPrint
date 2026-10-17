@@ -56,16 +56,18 @@ export async function GET(request: Request) {
       }
     }
 
-    // Determine effective org scope
-    const effectiveOrgId: string | undefined = callerUser.isSuperAdmin
-      ? resolvedOrgId || undefined
-      : callerUser.authorizedOrganizationIds[0];
-
     // Fetch all data from Supabase (authoritative source)
     const allOrgs = await dbGetOrganizations();
     const organizations = callerUser.isSuperAdmin
       ? allOrgs
       : allOrgs.filter((o) => callerUser.authorizedOrganizationIds.includes(o.id));
+
+    // Determine effective org scope (default to primary org if not specified)
+    const effectiveOrgId: string =
+      resolvedOrgId ||
+      (callerUser.isSuperAdmin
+        ? (organizations[0]?.id || GITAM_ORG_ID)
+        : (callerUser.authorizedOrganizationIds[0] || GITAM_ORG_ID));
 
     const kiosks = await dbGetKiosks(effectiveOrgId);
     const printers = await dbGetPrinters(effectiveOrgId);

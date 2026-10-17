@@ -30,6 +30,9 @@ apt-get install -y \
   python3 \
   python3-pip \
   python3-cups \
+  python3-requests \
+  python3-urllib3 \
+  python3-venv \
   chromium-browser \
   unclutter \
   xdotool \
@@ -39,7 +42,9 @@ apt-get install -y \
   procps
 
 echo "[3/8] Configuring CUPS permissions..."
-usermod -a -G lpadmin pi || true
+TARGET_USER="${SUDO_USER:-smartprint}"
+usermod -a -G lpadmin "$TARGET_USER" || true
+usermod -a -G lp "$TARGET_USER" || true
 systemctl enable cups
 systemctl restart cups
 
@@ -57,14 +62,17 @@ chmod 755 /var/lib/smartprint
 chmod 755 /etc/smartprint
 chmod 755 /var/log/smartprint
 
-echo "[5/8] Installing Python dependencies..."
-python3 -m pip install --break-system-packages pycups requests urllib3 || pip3 install pycups requests urllib3 || true
+echo "[5/8] Verifying Python dependencies..."
+python3 -c "import cups, requests, urllib3; print('[+] Python dependencies verified successfully.')" 2>/dev/null || {
+  echo "[*] Installing fallback Python dependencies..."
+  python3 -m pip install --break-system-packages pycups requests urllib3 || pip3 install pycups requests urllib3 || true
+}
 
 echo "[6/8] Generating Default Kiosk Configuration (/etc/smartprint/agent_config.json)..."
 if [ ! -f /etc/smartprint/agent_config.json ]; then
   cat <<EOF > /etc/smartprint/agent_config.json
 {
-  "backend_url": "http://192.168.1.100:3000",
+  "backend_url": "https://smart-prints.vercel.app",
   "kiosk_id": "GITAM-SPK-001",
   "device_token": "gitam_spk_001_secure_device_secret_2026",
   "poll_interval_sec": 4,
