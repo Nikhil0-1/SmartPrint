@@ -52,7 +52,9 @@ export async function getOrgRazorpayClient(organizationId: string = GITAM_ORG_ID
   // Only create client for real Razorpay key IDs
   if (
     config.razorpay_key_id.startsWith('rzp_') &&
-    !config.razorpay_key_id.includes('placeholder')
+    !config.razorpay_key_id.includes('placeholder') &&
+    !config.razorpay_key_id.includes('gitam_smartprint') &&
+    !config.razorpay_key_id.includes('xxxx')
   ) {
     const cached = orgClients.get(organizationId);
     if (cached && cached.keyId === config.razorpay_key_id) {
@@ -80,16 +82,170 @@ export async function getOrgRazorpayClient(organizationId: string = GITAM_ORG_ID
  */
 export async function getPublicRazorpayKeyId(organizationId: string = GITAM_ORG_ID): Promise<string> {
   const config = await dbGetPaymentConfig(organizationId);
-  if (config?.razorpay_key_id) return config.razorpay_key_id;
+  if (config?.razorpay_key_id && !config.razorpay_key_id.includes('gitam_smartprint') && !config.razorpay_key_id.includes('placeholder')) {
+    return config.razorpay_key_id;
+  }
   const storeCfg = store.getPaymentConfig(organizationId);
-  if (storeCfg?.razorpay_key_id) return storeCfg.razorpay_key_id;
-  return process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_gitam_smartprint';
+  if (storeCfg?.razorpay_key_id && !storeCfg.razorpay_key_id.includes('gitam_smartprint') && !storeCfg.razorpay_key_id.includes('placeholder')) {
+    return storeCfg.razorpay_key_id;
+  }
+  if (process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID && !process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID.includes('xxxx')) {
+    return process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
+  }
+  return config?.razorpay_key_id || '';
+}
+
+export interface RazorpayDiagnosticResult {
+  success: boolean;
+  code:
+    | 'SUCCESS'
+    | 'MISSING_CREDENTIALS'
+    | 'INVALID_KEY_FORMAT'
+    | 'MODE_MISMATCH'
+    | 'INVALID_WEBHOOK_SECRET'
+    | 'AUTH_FAILED'
+    | 'NETWORK_ERROR'
+    | 'SERVER_ERROR';
+  message: string;
+}
+
+/**
+ * Server-side diagnostic test for Razorpay credentials.
+ * Performs real authenticated read-only communication without charging or dispensing anything.
+ */
+export async function testRazorpayConnection(params: {
+  keyId: string;
+  keySecret: string;
+  mode?: 'TEST' | 'LIVE';
+  webhookSecret?: string;
+}): Promise<RazorpayDiagnosticResult> {
+  const { keyId, keySecret, mode = 'TEST', webhookSecret } = params;
+
+  if (!keyId || !keyId.trim()) {
+    return {
+      success: false,
+      code: 'MISSING_CREDENTIALS',
+      message: 'Razorpay Key ID is required.',
+    };
+  }
+
+  if (!keySecret || !keySecret.trim()) {
+    return {
+      success: false,
+      code: 'MISSING_CREDENTIALS',
+      message: 'Razorpay Key Secret is required.',
+    };
+  }
+
+  const cleanKey = keyId.trim();
+  const cleanSecret = keySecret.trim();
+
+  // Validate placeholder values
+  if (
+    cleanKey.includes('placeholder') ||
+    cleanKey.includes('gitam_smartprint') ||
+    cleanKey.includes('xxxx')
+  ) {
+    return {
+      success: false,
+      code: 'INVALID_KEY_FORMAT',
+      message:
+        'Please enter your actual Razorpay Key ID from the Razorpay Dashboard (Settings -> API Keys). Do not use placeholder values.',
+    };
+  }
+
+  // Validate key prefix
+  if (!cleanKey.startsWith('rzp_test_') && !cleanKey.startsWith('rzp_live_')) {
+    return {
+      success: false,
+      code: 'INVALID_KEY_FORMAT',
+      message: "Razorpay Key ID must start with 'rzp_test_' or 'rzp_live_'.",
+    };
+  }
+
+  // Validate mode alignment
+  if (mode === 'LIVE' && cleanKey.startsWith('rzp_test_')) {
+    return {
+      success: false,
+      code: 'MODE_MISMATCH',
+      message:
+        "Mode mismatch: You have selected 'Live Production' mode, but the Key ID starts with 'rzp_test_'. Either switch the mode to 'Test Mode' or enter your Live Key ID ('rzp_live_...').",
+    };
+  }
+
+  if (mode === 'TEST' && cleanKey.startsWith('rzp_live_')) {
+    return {
+      success: false,
+      code: 'MODE_MISMATCH',
+      message:
+        "Mode mismatch: You have selected 'Test Mode', but the Key ID starts with 'rzp_live_'. Either switch the mode to 'Live Production' or enter your Test Key ID ('rzp_test_...').",
+    };
+  }
+
+  // Validate webhook secret format if provided
+  if (webhookSecret && webhookSecret.trim()) {
+    const ws = webhookSecret.trim();
+    if (ws.startsWith('http://') || ws.startsWith('https://')) {
+      return {
+        success: false,
+        code: 'INVALID_WEBHOOK_SECRET',
+        message:
+          'Webhook Secret cannot be a URL. Enter the secret string you defined in Razorpay Dashboard when configuring the webhook.',
+      };
+    }
+  }
+
+  // Real authenticated API call to Razorpay
+  try {
+    const client = new Razorpay({
+      key_id: cleanKey,
+      key_secret: cleanSecret,
+    });
+
+    // payments.all with count: 1 is a safe, read-only API call that verifies credentials
+    await client.payments.all({ count: 1 });
+
+    return {
+      success: true,
+      code: 'SUCCESS',
+      message: `Successfully connected to Razorpay (${mode} Mode). Credentials verified and operational.`,
+    };
+  } catch (err: any) {
+    const statusCode = err?.statusCode || err?.status || err?.error?.code;
+    const desc = err?.error?.description || err?.message || 'Authentication failed';
+
+    if (
+      statusCode === 401 ||
+      desc.toLowerCase().includes('auth') ||
+      desc.toLowerCase().includes('not exist') ||
+      desc.toLowerCase().includes('unauthorized')
+    ) {
+      return {
+        success: false,
+        code: 'AUTH_FAILED',
+        message: `Razorpay rejected credentials (401 Unauthorized): ${desc}. Verify Key ID and Secret in Razorpay Dashboard.`,
+      };
+    }
+
+    if (err?.code === 'ENOTFOUND' || err?.code === 'ETIMEDOUT' || err?.name === 'FetchError') {
+      return {
+        success: false,
+        code: 'NETWORK_ERROR',
+        message: `Network error connecting to Razorpay API: ${desc}`,
+      };
+    }
+
+    return {
+      success: false,
+      code: 'SERVER_ERROR',
+      message: `Razorpay diagnostic failed: ${desc}`,
+    };
+  }
 }
 
 /**
  * Creates a real Razorpay order via the API.
- * Returns null if the Razorpay client is not configured, rather than silently
- * creating a fake order that bypasses payment verification.
+ * Never silently creates mock orders in production.
  */
 export async function createMultiTenantRazorpayOrder(
   organizationId: string,
@@ -105,7 +261,7 @@ export async function createMultiTenantRazorpayOrder(
 
   if (!client || !config || config.status !== 'CONFIGURED') {
     console.error(
-      `[RAZORPAY] Cannot create order for org ${organizationId}: payment gateway not configured.`
+      `[RAZORPAY] Cannot create order for org ${organizationId}: payment gateway not configured or verified.`
     );
     return null;
   }
@@ -137,7 +293,11 @@ export async function createMultiTenantRazorpayOrder(
           : Math.floor(Date.now() / 1000),
     };
   } catch (err) {
-    if (config.mode === 'TEST' || config.razorpay_key_id.startsWith('rzp_test_')) {
+    const isTestRunner =
+      process.env.NODE_ENV === 'test' ||
+      process.env.ALLOW_TEST_PAYMENT_BYPASS === 'true';
+
+    if (isTestRunner) {
       const mockOrderId = `order_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
       return {
         id: mockOrderId,
@@ -151,7 +311,9 @@ export async function createMultiTenantRazorpayOrder(
         created_at: Math.floor(Date.now() / 1000),
       };
     }
-    console.error(`[RAZORPAY ERROR] Failed to create order: ${(err as Error).message}`);
+
+    const errorMsg = (err as any)?.error?.description || (err as Error).message || 'Order creation failed';
+    console.error(`[RAZORPAY ERROR] Failed to create order for org ${organizationId}: ${errorMsg}`);
     return null;
   }
 }

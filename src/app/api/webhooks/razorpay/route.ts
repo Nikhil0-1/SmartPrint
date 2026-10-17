@@ -125,7 +125,13 @@ export async function POST(request: Request) {
         const orderRecord = await dbGetPaymentOrder(orderId);
         if (orderRecord) {
           const jobId = orderRecord.job_id as string;
-          await dbUpdatePrintJobStatus(jobId, 'PAYMENT_FAILED', 'Payment failed at gateway');
+          const currentJob = await dbGetPrintJob(jobId);
+          // Never overwrite an already verified, queued, printing, or completed job
+          const protectedStatuses = ['PAYMENT_VERIFIED', 'QUEUED', 'DISPATCHED', 'PRINTING', 'COMPLETED'];
+          if (currentJob && !protectedStatuses.includes(currentJob.status)) {
+            await dbUpdatePrintJobStatus(jobId, 'PAYMENT_FAILED', 'Payment failed at gateway');
+            store.updateJobStatus(jobId, 'FAILED', { error_message: 'Payment failed at gateway' });
+          }
         }
       }
     }

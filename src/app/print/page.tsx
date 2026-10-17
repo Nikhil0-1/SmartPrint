@@ -301,6 +301,11 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
     const RazorpayConstructor = win ? (win.Razorpay as new (opts: unknown) => { open: () => void; on: (e: string, cb: (res: unknown) => void) => void }) : null;
 
     if (RazorpayConstructor && razorpayKeyId) {
+      if (razorpayKeyId.includes('gitam_smartprint') || razorpayKeyId.includes('placeholder')) {
+        setUploadError('Payment gateway configuration required: Real Razorpay Key ID must be configured and verified in Admin Settings.');
+        setStep('ERROR');
+        return;
+      }
       try {
         const options = {
           key: razorpayKeyId,

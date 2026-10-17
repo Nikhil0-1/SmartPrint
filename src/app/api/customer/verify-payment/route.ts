@@ -25,9 +25,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Invalid or empty request body' }, { status: 400 });
     }
 
-    if (!order_id || !payment_id) {
+    if (!order_id || !payment_id || !signature) {
       return NextResponse.json(
-        { error: 'order_id and payment_id are required' },
+        { error: 'order_id, payment_id, and signature are required' },
         { status: 400 }
       );
     }
@@ -43,7 +43,7 @@ export async function POST(request: Request) {
     }
 
     // 2. Verify HMAC-SHA256 signature using the organization's configured secret
-    const isValid = await verifyPaymentSignature(order_id, payment_id, signature || 'mock_sig_test', orgId);
+    const isValid = await verifyPaymentSignature(order_id, payment_id, signature, orgId);
     if (!isValid) {
       await dbWriteSystemLog({
         level: 'WARNING',

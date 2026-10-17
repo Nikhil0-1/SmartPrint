@@ -117,7 +117,14 @@ export async function POST(request: Request) {
     );
 
     if (!order) {
-      return NextResponse.json({ error: 'Failed to create Razorpay order.' }, { status: 500 });
+      return NextResponse.json(
+        {
+          error:
+            'Payment gateway error: Unable to initialize Razorpay order. Please ensure your Razorpay Key ID and Secret are configured and verified in Admin Settings.',
+          code: 'PAYMENT_GATEWAY_NOT_READY',
+        },
+        { status: 502 }
+      );
     }
 
     const orderId = (order as any).id as string;

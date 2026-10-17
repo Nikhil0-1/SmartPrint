@@ -137,8 +137,7 @@ function AdminDashboardContent({
       const data = await res.json();
       if (res.ok && data) {
         setAdminData(data);
-        const recentlySaved = Date.now() - lastSaveTimeRef.current < 12000;
-        if (!initialLoadDone.current || !recentlySaved) {
+        if (!initialLoadDone.current) {
           if (data.pricing) setPricingForm(data.pricing);
           if (data.branding) setBrandingForm(data.branding);
           if (data.payment_config) {
@@ -150,8 +149,17 @@ function AdminDashboardContent({
               verified_at: data.payment_config.verified_at || null,
             }));
           }
+          initialLoadDone.current = true;
+        } else {
+          // On background polling, update status and verified_at non-destructively without overwriting what the user is typing
+          if (data.payment_config) {
+            setPaymentConfigForm((prev) => ({
+              ...prev,
+              status: data.payment_config.status || prev.status,
+              verified_at: data.payment_config.verified_at ?? prev.verified_at,
+            }));
+          }
         }
-        initialLoadDone.current = true;
       }
     } catch (err) {
       console.error('Failed to load admin data:', err);
@@ -1267,9 +1275,16 @@ function AdminDashboardContent({
                       onChange={(e) => setPaymentConfigForm({ ...paymentConfigForm, razorpay_key_id: e.target.value.trim() })}
                       className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl font-mono text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                    <span className="text-[10px] text-slate-400 mt-1 block">
-                      Found in Razorpay Dashboard &rarr; Settings &rarr; API Keys.
-                    </span>
+                    {paymentConfigForm.razorpay_key_id.includes('gitam_smartprint') ? (
+                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-[11px] font-semibold mt-1.5 flex items-center gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                        <span>Action Required: Replace this placeholder with your real Razorpay Key ID from the Razorpay Dashboard.</span>
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-slate-400 mt-1 block">
+                        Found in Razorpay Dashboard &rarr; Settings &rarr; API Keys.
+                      </span>
+                    )}
                   </div>
 
                   {/* Razorpay Key Secret */}
@@ -1320,7 +1335,7 @@ function AdminDashboardContent({
                       </button>
                     </div>
                     <span className="text-[10px] text-slate-400 mt-1 block">
-                      Used to cryptographically verify incoming Razorpay webhook payment notifications.
+                      Secret string configured in Razorpay Dashboard. <strong className="text-amber-600">Do NOT paste the Webhook URL here.</strong>
                     </span>
                   </div>
 
@@ -1333,7 +1348,7 @@ function AdminDashboardContent({
                       <code className="flex-1 bg-white border border-slate-200 px-3 py-1.5 rounded-lg text-slate-800 font-mono text-[11px] truncate select-all">
                         {typeof window !== 'undefined'
                           ? `${window.location.origin}/api/webhooks/razorpay`
-                          : 'https://smart-print-sandy.vercel.app/api/webhooks/razorpay'}
+                          : 'https://smart-prints.vercel.app/api/webhooks/razorpay'}
                       </code>
                       <button
                         type="button"
@@ -1341,7 +1356,7 @@ function AdminDashboardContent({
                           const url =
                             typeof window !== 'undefined'
                               ? `${window.location.origin}/api/webhooks/razorpay`
-                              : 'https://smart-print-sandy.vercel.app/api/webhooks/razorpay';
+                              : 'https://smart-prints.vercel.app/api/webhooks/razorpay';
                           navigator.clipboard.writeText(url);
                           setCopiedWebhookUrl(true);
                           setTimeout(() => setCopiedWebhookUrl(false), 2500);
@@ -1357,11 +1372,29 @@ function AdminDashboardContent({
                     </span>
                   </div>
 
-                  {/* Validation Timestamp */}
-                  {paymentConfigForm.verified_at && (
-                    <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>Last successfully verified: {new Date(paymentConfigForm.verified_at).toLocaleString()}</span>
+                  {/* Gateway Status & Diagnostic Banner */}
+                  {paymentConfigForm.status === 'VERIFICATION_FAILED' && (
+                    <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs space-y-1">
+                      <div className="font-bold flex items-center gap-1.5 text-red-900">
+                        <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                        <span>Payment Gateway Verification Failed</span>
+                      </div>
+                      <p className="text-[11px] text-red-700">
+                        {adminData?.payment_config?.last_error ||
+                          'Razorpay credentials could not be verified. Please enter valid Key ID & Secret and click "Test Connection".'}
+                      </p>
+                    </div>
+                  )}
+
+                  {paymentConfigForm.status === 'CONFIGURED' && paymentConfigForm.verified_at && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-xs flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <div>
+                        <span className="font-bold text-emerald-900 block">Gateway Operational & Verified</span>
+                        <span className="text-[10px] text-emerald-700">
+                          Last authenticated: {new Date(paymentConfigForm.verified_at).toLocaleString()}
+                        </span>
+                      </div>
                     </div>
                   )}
 
