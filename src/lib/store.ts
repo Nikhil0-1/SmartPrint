@@ -156,7 +156,7 @@ class StateManager {
       id: 'RPI-GITAM-SPK-001',
       organization_id: GITAM_ORG_ID,
       kiosk_id: 'GITAM-SPK-001',
-      device_token_hash: 'gitam_spk_001_secure_device_secret_2026',
+      device_token_hash: '01d967ef21948ec72e3adf563759394e517a5a759d8e0f51f38679b1806898af',
       status: 'ONLINE',
       ip_address: '192.168.1.105',
       mac_address: 'B8:27:EB:4D:2A:11',

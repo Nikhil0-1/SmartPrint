@@ -44,3 +44,8 @@ next-env.d.ts
 # python
 __pycache__/
 *.py[cod]
+
+# hardware device credentials
+device_credentials.env
+*.device.env
+

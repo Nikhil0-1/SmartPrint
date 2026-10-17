@@ -180,12 +180,14 @@ export async function verifyPaymentSignature(
     return false;
   }
 
-  // In test mode, allow test signature verification for automated test suites and test mode runs
-  const isTestMode =
-    (dbConfig?.mode || storeConfig?.mode || 'TEST') === 'TEST' ||
-    Boolean(dbConfig?.razorpay_key_id?.startsWith('rzp_test_')) ||
-    Boolean(storeConfig?.razorpay_key_id?.startsWith('rzp_test_'));
-  if (isTestMode && (signature === 'mock_sig_test' || signature.startsWith('mock_sig_') || signature.startsWith('mock_sig'))) {
+  // Prohibit mock signatures in live production environments
+  // Only permit simulated mock signatures during automated test suites or local dev
+  const isLocalOrTestRunner =
+    process.env.NODE_ENV === 'test' ||
+    process.env.ALLOW_TEST_PAYMENT_BYPASS === 'true' ||
+    Boolean(process.env.NEXT_PUBLIC_APP_URL?.includes('localhost'));
+
+  if (isLocalOrTestRunner && (signature === 'mock_sig_test' || signature.startsWith('mock_sig_') || signature.startsWith('mock_sig'))) {
     return true;
   }
 

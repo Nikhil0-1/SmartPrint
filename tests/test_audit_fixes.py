@@ -27,9 +27,22 @@ from cups_controller import CupsController
 
 BASE_URL = os.getenv("SMARTPRINT_BASE_URL", "http://localhost:3000").rstrip("/")
 VALID_KIOSK_ID = os.getenv("SMARTPRINT_KIOSK_ID", "GITAM-SPK-001")
-VALID_DEVICE_TOKEN = os.getenv("SMARTPRINT_DEVICE_TOKEN", "gitam_spk_001_secure_device_secret_2026")
 SECOND_KIOSK_ID = "GITAM-SPK-002"
-SECOND_DEVICE_TOKEN = "gitam_spk_002_secure_device_secret_2026"
+
+# Read active rotated credentials from environment or device_credentials.env
+def _load_device_token(key, default=""):
+    if os.getenv(key):
+        return os.getenv(key)
+    env_file = os.path.join(os.path.dirname(__file__), "..", "device_credentials.env")
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith(f"{key}="):
+                    return line.strip().split("=", 1)[1]
+    return default
+
+VALID_DEVICE_TOKEN = _load_device_token("KIOSK_001_TOKEN")
+SECOND_DEVICE_TOKEN = _load_device_token("KIOSK_002_TOKEN")
 INVALID_DEVICE_TOKEN = "invalid_secret_token_unauthorized_9999"
 
 

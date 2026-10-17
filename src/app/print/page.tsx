@@ -338,19 +338,15 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
         rzp.open();
         return;
       } catch (err) {
-        console.warn('Razorpay SDK modal could not be launched, falling back to simulated test payment:', err);
+        console.error('Razorpay SDK error:', err);
+        setUploadError('Payment gateway could not be opened. Please reload or contact support.');
+        setStep('ERROR');
+        return;
       }
     }
 
-    // Test mode fallback
-    handleSimulateTestPayment();
-  };
-
-  // Simulated Test Payment for Test Mode & Automated Validations
-  const handleSimulateTestPayment = () => {
-    const paymentId = `pay_test_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
-    const mockSignature = `mock_sig_${Date.now()}`;
-    executeVerificationWithServer(paymentOrderId, paymentId, mockSignature);
+    setUploadError('Payment gateway is loading. Please wait a moment and try again.');
+    setStep('ERROR');
   };
 
   const handleReset = () => {
@@ -731,18 +727,6 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
                 <CreditCard className="w-4 h-4" />
                 <span>Pay ₹{calculatedAmount.toFixed(2)} via UPI / Razorpay</span>
               </button>
-
-              {/* Developer / Staging Test Mode Button */}
-              {(razorpayKeyId.startsWith('rzp_test_') || true) && (
-                <button
-                  type="button"
-                  onClick={handleSimulateTestPayment}
-                  className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                  <span>Simulate Payment (Test Mode / Instant Validation)</span>
-                </button>
-              )}
 
               <div className="text-center space-y-1">
                 <span className="text-[11px] text-slate-400 block">
