@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
+import { dbGetPrintJob, dbUpdatePrintJobStatus } from '@/lib/db';
 import { permanentlyDeleteDocument } from '@/lib/fileSecurity';
 
 export async function POST(request: Request) {
@@ -24,30 +25,44 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'job_id is required' }, { status: 400 });
       }
 
-      const job = store.getJob(job_id);
+      let job = store.getJob(job_id);
+      if (!job) {
+        const dbJob = await dbGetPrintJob(job_id);
+        if (dbJob) {
+          job = {
+            id: dbJob.id,
+            organization_id: dbJob.organization_id || '',
+            kiosk_id: dbJob.kiosk_id,
+            status: dbJob.status as any,
+            created_at: dbJob.created_at,
+          } as any;
+        }
+      }
+
       if (!job) {
         return NextResponse.json({ error: 'Job not found' }, { status: 404 });
       }
 
       // 1. Advance to DOWNLOADING
       store.updateJobStatus(job_id, 'DOWNLOADING');
-      await new Promise((r) => setTimeout(r, 600));
+      await dbUpdatePrintJobStatus(job_id, 'DOWNLOADING');
 
       // 2. Advance to PROCESSING
       store.updateJobStatus(job_id, 'PROCESSING');
-      await new Promise((r) => setTimeout(r, 600));
+      await dbUpdatePrintJobStatus(job_id, 'PROCESSING');
 
       // 3. Submit to CUPS
       const mockCupsId = Math.floor(100 + Math.random() * 900);
       store.updateJobStatus(job_id, 'SUBMITTED_TO_CUPS', { cups_job_id: mockCupsId });
-      await new Promise((r) => setTimeout(r, 800));
+      await dbUpdatePrintJobStatus(job_id, 'SUBMITTED_TO_CUPS', undefined, mockCupsId);
 
       // 4. PRINTING
       store.updateJobStatus(job_id, 'PRINTING', { cups_job_id: mockCupsId });
-      await new Promise((r) => setTimeout(r, 1200));
+      await dbUpdatePrintJobStatus(job_id, 'PRINTING', undefined, mockCupsId);
 
       // 5. COMPLETED & IMMEDIATE DOCUMENT PURGE
       store.updateJobStatus(job_id, 'COMPLETED', { cups_job_id: mockCupsId });
+      await dbUpdatePrintJobStatus(job_id, 'COMPLETED', undefined, mockCupsId);
       if (kiosk_id) {
         store.releaseKioskJob(kiosk_id, job_id);
       }
