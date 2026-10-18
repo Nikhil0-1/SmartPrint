@@ -132,10 +132,12 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
       }
 
       setFile(selectedFile);
-      setJobId(data.job.id);
-      setTotalPages(data.job.pages_total || 1);
-      setCalculatedAmount(data.job.calculated_amount || 1.0);
-      if (data.job.organization_id) setOrganizationId(data.job.organization_id);
+      // Upload API returns { jobs: [{jobId, fileName, pages, amount_rupees}], total_amount }
+      const firstJob = data.jobs?.[0];
+      if (!firstJob) throw new Error('Upload succeeded but no job was created.');
+      setJobId(firstJob.jobId);
+      setTotalPages(firstJob.pages || 1);
+      setCalculatedAmount(data.total_amount || firstJob.amount_rupees || 1.0);
       setStep('CONFIG');
     } catch (err) {
       setUploadError((err as Error).message);
