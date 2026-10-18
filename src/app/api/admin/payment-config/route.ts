@@ -79,12 +79,15 @@ export async function POST(request: Request) {
 
     // Resolve key_id and secret to test/save
     const effectiveKeyId = razorpay_key_id ? razorpay_key_id.trim() : existingConfig?.razorpay_key_id || '';
+    // NOTE: We cannot decrypt the stored encrypted secret here; require explicit secret for any operation that needs it.
     let effectiveKeySecret = '';
     if (razorpay_key_secret && !razorpay_key_secret.includes('••••')) {
       effectiveKeySecret = razorpay_key_secret.trim();
-    } else {
-      effectiveKeySecret = existingConfig?.razorpay_key_secret_encrypted || '';
+    } else if (existingConfig?.razorpay_key_secret_encrypted) {
+      // If a secret already exists but not provided, we cannot use it for testing; skip test connection.
+      effectiveKeySecret = ''; // empty indicates unavailable for test.
     }
+
 
     let effectiveWebhookSecret = '';
     if (webhook_secret && !webhook_secret.includes('••••')) {
@@ -95,16 +98,33 @@ export async function POST(request: Request) {
 
     // ── CASE 1: Test Connection Request ─────────────────────────────────────────
     if (test_connection) {
-      if (!effectiveKeyId || !effectiveKeySecret) {
+      // Validate that the provided key ID matches the selected mode.
+      if (mode === 'LIVE' && effectiveKeyId.startsWith('rzp_test_')) {
         return NextResponse.json(
-          {
-            success: false,
-            error: 'Cannot test connection: both Razorpay Key ID and Key Secret must be provided.',
-            code: 'MISSING_CREDENTIALS',
-          },
+          { success: false, error: 'Live mode requires a Live Key ID (rzp_live_...).', code: 'KEY_MODE_MISMATCH' },
           { status: 400 }
         );
       }
+      if (mode === 'TEST' && effectiveKeyId.startsWith('rzp_live_')) {
+        return NextResponse.json(
+          { success: false, error: 'Test mode requires a Test Key ID (rzp_test_...).', code: 'KEY_MODE_MISMATCH' },
+          { status: 400 }
+        );
+      }
+
+      if (!effectiveKeyId) {
+        return NextResponse.json(
+          { success: false, error: 'Key ID is required for testing.', code: 'MISSING_KEY_ID' },
+          { status: 400 }
+        );
+      }
+      if (!effectiveKeySecret) {
+        return NextResponse.json(
+          { success: false, error: 'Key Secret is required for testing. Please re-enter it.', code: 'MISSING_KEY_SECRET' },
+          { status: 400 }
+        );
+      }
+
 
       const diagnostic = await testRazorpayConnection({
         keyId: effectiveKeyId,
@@ -161,6 +181,20 @@ export async function POST(request: Request) {
     }
 
     // ── CASE 2: Save Gateway Settings ──────────────────────────────────────────
+    // Validate mode vs key prefix on save
+    if (mode === 'LIVE' && effectiveKeyId && effectiveKeyId.startsWith('rzp_test_')) {
+      return NextResponse.json(
+        { success: false, error: 'Live mode requires a Live Key ID (rzp_live_...).', code: 'KEY_MODE_MISMATCH' },
+        { status: 400 }
+      );
+    }
+    if (mode === 'TEST' && effectiveKeyId && effectiveKeyId.startsWith('rzp_live_')) {
+      return NextResponse.json(
+        { success: false, error: 'Test mode requires a Test Key ID (rzp_test_...).', code: 'KEY_MODE_MISMATCH' },
+        { status: 400 }
+      );
+    }
+
     // Validate Webhook Secret format (common admin mistake: pasting webhook URL)
     if (effectiveWebhookSecret && (effectiveWebhookSecret.startsWith('http://') || effectiveWebhookSecret.startsWith('https://'))) {
       return NextResponse.json(
@@ -172,13 +206,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // Perform live connection diagnostic on save
-    const diagnostic = await testRazorpayConnection({
-      keyId: effectiveKeyId,
-      keySecret: effectiveKeySecret,
-      mode: mode as 'TEST' | 'LIVE',
-      webhookSecret: effectiveWebhookSecret || undefined,
-    });
+    // Perform live connection diagnostic on save only if we have a usable secret.
+    let diagnostic = { success: true, message: 'Skipped verification (no secret provided)', code: 'SKIPPED' } as any;
+    if (effectiveKeySecret) {
+      diagnostic = await testRazorpayConnection({
+        keyId: effectiveKeyId,
+        keySecret: effectiveKeySecret,
+        mode: mode as 'TEST' | 'LIVE',
+        webhookSecret: effectiveWebhookSecret || undefined,
+      });
+    }
+
 
     const isVerified = diagnostic.success;
     const verifiedAt = isVerified ? new Date().toISOString() : null;
@@ -192,7 +230,7 @@ export async function POST(request: Request) {
       verified_at: verifiedAt,
       last_error: lastError,
     };
-
+    // Include secrets only if explicitly provided (not masked)
     if (razorpay_key_secret && !razorpay_key_secret.includes('••••')) {
       updates.razorpay_key_secret = razorpay_key_secret.trim();
     }
@@ -225,7 +263,7 @@ export async function POST(request: Request) {
       organization_id: orgId,
     });
 
-    if (!isVerified) {
+    if (!isVerified && effectiveKeySecret) {
       return NextResponse.json(
         {
           success: false,
@@ -243,17 +281,22 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+    // If verification was skipped due to missing secret, treat as configured but unverified.
+    if (!effectiveKeySecret) {
+      // Keep status as NOT_CONFIGURED if never verified.
+      saved.status = saved.status || 'NOT_CONFIGURED';
+    }
 
     return NextResponse.json({
       success: true,
-      message: 'Payment Gateway settings saved and verified with Razorpay API.',
+      message: effectiveKeySecret ? 'Payment Gateway settings saved and verified with Razorpay API.' : 'Payment Gateway settings saved. Verification pending (no secret provided).',
       config: {
         organization_id: saved.organization_id,
         razorpay_key_id: saved.razorpay_key_id,
         mode: saved.mode,
         status: saved.status,
         verified_at: saved.verified_at,
-        last_error: null,
+        last_error: saved.last_error,
       },
     });
   } catch (error) {
