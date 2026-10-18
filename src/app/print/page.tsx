@@ -18,6 +18,8 @@ import {
   Users,
   Layers,
   Sparkles,
+  Minus,
+  Plus,
 } from 'lucide-react';
 import { Footer } from '@/components/Footer';
 import { DEFAULT_BRANDING, DEFAULT_PRICING } from '@/lib/constants';
@@ -146,10 +148,32 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
     }
   };
 
+  // Helper to count selected pages from page ranges
+  const getSelectedPageCount = useCallback((): number => {
+    if (pagesMode === 'ALL') return totalPages;
+    if (!customPageRange.trim()) return 1;
+    const ranges = customPageRange.split(',');
+    let count = 0;
+    for (const r of ranges) {
+      const parts = r.trim().split('-');
+      if (parts.length === 2) {
+        const start = parseInt(parts[0], 10);
+        const end = parseInt(parts[1], 10);
+        if (!isNaN(start) && !isNaN(end) && end >= start) {
+          count += Math.min(end, totalPages) - Math.max(1, start) + 1;
+        }
+      } else if (parts.length === 1 && !isNaN(parseInt(parts[0], 10))) {
+        const p = parseInt(parts[0], 10);
+        if (p >= 1 && p <= totalPages) count += 1;
+      }
+    }
+    return count > 0 ? count : 1;
+  }, [pagesMode, customPageRange, totalPages]);
+
   // Recalculate Price on options change
   const recalculatePrice = useCallback(async () => {
     if (!jobId || step !== 'CONFIG') return;
-    const pagesSelected = pagesMode === 'ALL' ? 'All' : customPageRange || '1';
+    const pagesSelected = pagesMode === 'ALL' ? 'All' : (customPageRange.trim() || '1');
     setIsCalculating(true);
 
     try {
@@ -159,6 +183,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
         body: JSON.stringify({
           job_id: jobId,
           organization_id: organizationId,
+          pages: totalPages,
           pages_selected: pagesSelected,
           copies,
           is_color: isColor,
@@ -173,12 +198,14 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
     } catch {
       // Fallback local computation if network fails
       const rate = isColor ? pricing.color_price_per_page : pricing.bw_price_per_page;
-      const count = pagesMode === 'ALL' ? totalPages : 1;
-      setCalculatedAmount(Math.max(1, count * copies * rate));
+      const count = getSelectedPageCount();
+      const serviceCharge = pricing.service_charge || 0;
+      const minAmount = pricing.min_order_amount || 1.0;
+      setCalculatedAmount(Math.max(minAmount, count * copies * rate + serviceCharge));
     } finally {
       setIsCalculating(false);
     }
-  }, [jobId, organizationId, copies, pagesMode, customPageRange, isColor, isDuplex, orientation, step, pricing, totalPages]);
+  }, [jobId, organizationId, copies, pagesMode, customPageRange, isColor, isDuplex, orientation, step, pricing, totalPages, getSelectedPageCount]);
 
   useEffect(() => {
     recalculatePrice();
@@ -509,27 +536,67 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
 
             {/* Options Form */}
             <div className="space-y-4 text-xs">
-              {/* Copies */}
+              {/* Copies Stepper */}
               <div>
                 <label className="block text-slate-700 font-bold mb-1.5 flex items-center justify-between">
                   <span>Number of Copies</span>
                   <span className="text-blue-600 font-semibold">{copies} {copies === 1 ? 'copy' : 'copies'}</span>
                 </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {[1, 2, 3, 5].map((num) => (
+                <div className="flex flex-col sm:flex-row gap-2.5 sm:items-center">
+                  {/* Stepper with - [box] + */}
+                  <div className="flex items-center justify-between border-2 border-slate-200 rounded-xl bg-white shadow-sm p-1 max-w-[200px]">
                     <button
-                      key={num}
                       type="button"
-                      onClick={() => setCopies(num)}
-                      className={`py-2 rounded-xl font-bold border text-xs transition-colors ${
-                        copies === num
-                          ? 'bg-[#0d253f] border-[#0d253f] text-white'
-                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
+                      onClick={() => setCopies((prev) => Math.max(1, prev - 1))}
+                      disabled={copies <= 1}
+                      className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-100 text-slate-800 hover:bg-slate-200 active:scale-95 disabled:opacity-30 disabled:hover:bg-slate-100 transition-all font-bold"
+                      aria-label="Decrease copies"
                     >
-                      {num}
+                      <Minus className="w-4 h-4 stroke-[2.5]" />
                     </button>
-                  ))}
+                    <input
+                      type="number"
+                      min={1}
+                      max={pricing.max_copies || 100}
+                      value={copies}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val)) {
+                          setCopies(Math.max(1, Math.min(val, pricing.max_copies || 100)));
+                        } else if (e.target.value === '') {
+                          setCopies(1);
+                        }
+                      }}
+                      className="w-14 text-center font-black text-slate-900 text-sm focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setCopies((prev) => Math.min(pricing.max_copies || 100, prev + 1))}
+                      disabled={copies >= (pricing.max_copies || 100)}
+                      className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-100 text-slate-800 hover:bg-slate-200 active:scale-95 disabled:opacity-30 disabled:hover:bg-slate-100 transition-all font-bold"
+                      aria-label="Increase copies"
+                    >
+                      <Plus className="w-4 h-4 stroke-[2.5]" />
+                    </button>
+                  </div>
+
+                  {/* Preset quick buttons */}
+                  <div className="grid grid-cols-4 gap-1.5 flex-1">
+                    {[1, 2, 5, 10].map((num) => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setCopies(num)}
+                        className={`py-2 rounded-xl font-bold border text-xs transition-all ${
+                          copies === num
+                            ? 'bg-[#0d253f] border-[#0d253f] text-white shadow-sm'
+                            : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {num}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -571,15 +638,20 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
 
               {/* Page Selection */}
               <div>
-                <label className="block text-slate-700 font-bold mb-1.5">Pages to Print</label>
+                <label className="block text-slate-700 font-bold mb-1.5 flex items-center justify-between">
+                  <span>Pages to Print</span>
+                  <span className="text-blue-600 font-semibold">
+                    {getSelectedPageCount()} of {totalPages} {totalPages === 1 ? 'page' : 'pages'}
+                  </span>
+                </label>
                 <div className="grid grid-cols-2 gap-2 mb-2">
                   <button
                     type="button"
                     onClick={() => setPagesMode('ALL')}
-                    className={`py-2 rounded-xl border font-bold text-xs transition-colors ${
+                    className={`py-2.5 rounded-xl border font-bold text-xs transition-all ${
                       pagesMode === 'ALL'
-                        ? 'bg-slate-900 border-slate-900 text-white'
-                        : 'bg-slate-50 border-slate-200 text-slate-700'
+                        ? 'bg-[#0d253f] border-[#0d253f] text-white shadow-sm'
+                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
                     }`}
                   >
                     All Pages (1-{totalPages})
@@ -587,10 +659,10 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
                   <button
                     type="button"
                     onClick={() => setPagesMode('CUSTOM')}
-                    className={`py-2 rounded-xl border font-bold text-xs transition-colors ${
+                    className={`py-2.5 rounded-xl border font-bold text-xs transition-all ${
                       pagesMode === 'CUSTOM'
-                        ? 'bg-slate-900 border-slate-900 text-white'
-                        : 'bg-slate-50 border-slate-200 text-slate-700'
+                        ? 'bg-[#0d253f] border-[#0d253f] text-white shadow-sm'
+                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
                     }`}
                   >
                     Custom Range
@@ -598,13 +670,19 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
                 </div>
 
                 {pagesMode === 'CUSTOM' && (
-                  <input
-                    type="text"
-                    placeholder="e.g. 1-3 or 1,2,4"
-                    value={customPageRange}
-                    onChange={(e) => setCustomPageRange(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs focus:outline-none focus:border-blue-500"
-                  />
+                  <div className="space-y-1.5 mt-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                    <input
+                      type="text"
+                      placeholder={`e.g. 1-${Math.min(3, totalPages)} or 1,2,4 (1 to ${totalPages})`}
+                      value={customPageRange}
+                      onChange={(e) => setCustomPageRange(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs bg-white focus:outline-none focus:border-blue-500 font-medium"
+                    />
+                    <div className="flex items-center justify-between text-[11px] text-slate-500 px-0.5">
+                      <span>Selected: <strong className="text-blue-700 font-bold">{getSelectedPageCount()} pages</strong></span>
+                      <span>Total document: {totalPages} {totalPages === 1 ? 'page' : 'pages'}</span>
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -715,7 +793,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
               <div className="flex justify-between text-slate-600">
                 <span>Print Spec:</span>
                 <span className="font-semibold text-slate-900">
-                  {totalPages} {totalPages === 1 ? 'page' : 'pages'} × {copies} {copies === 1 ? 'copy' : 'copies'} ({isColor ? 'Colour' : 'B&W'})
+                  {getSelectedPageCount()} {getSelectedPageCount() === 1 ? 'page' : 'pages'} × {copies} {copies === 1 ? 'copy' : 'copies'} ({isColor ? 'Colour' : 'B&W'})
                 </span>
               </div>
               <div className="pt-2.5 border-t border-slate-200 flex justify-between items-center text-sm">

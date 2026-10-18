@@ -787,9 +787,20 @@ export async function dbGetPaymentOrder(razorpayOrderId: string): Promise<Record
     .from('payment_orders')
     .select('*')
     .eq('razorpay_order_id', razorpayOrderId)
-    .single();
+    .limit(1)
+    .maybeSingle();
   if (error) return null;
   return data;
+}
+
+export async function dbGetPaymentOrders(razorpayOrderId: string): Promise<Record<string, unknown>[]> {
+  if (!isConfigured()) return [];
+  const { data, error } = await supabaseAdmin
+    .from('payment_orders')
+    .select('*')
+    .eq('razorpay_order_id', razorpayOrderId);
+  if (error) return [];
+  return data || [];
 }
 
 export async function dbCreatePaymentOrder(order: {
@@ -1190,6 +1201,43 @@ export async function dbUpdatePrintJobStatus(
     .from('print_jobs')
     .update(updates)
     .eq('id', jobId);
+}
+
+/**
+ * Updates print job configuration parameters and recalculations in Supabase.
+ */
+export async function dbUpdatePrintJobConfig(
+  jobId: string,
+  config: {
+    pages_total?: number;
+    pages_selected?: string;
+    copies?: number;
+    is_color?: boolean;
+    is_duplex?: boolean;
+    orientation?: string;
+    calculated_amount?: number;
+    amount_paise?: number;
+  }
+): Promise<void> {
+  if (!isConfigured()) return;
+  const updates: Record<string, unknown> = {};
+  if (config.pages_total !== undefined) updates.pages_total = config.pages_total;
+  if (config.pages_selected !== undefined) updates.pages_selected = config.pages_selected;
+  if (config.copies !== undefined) updates.copies = config.copies;
+  if (config.is_color !== undefined) updates.is_color = config.is_color;
+  if (config.is_duplex !== undefined) updates.is_duplex = config.is_duplex;
+  if (config.orientation !== undefined) updates.orientation = config.orientation;
+  if (config.calculated_amount !== undefined) updates.calculated_amount = config.calculated_amount;
+  if (config.amount_paise !== undefined) updates.amount_paise = config.amount_paise;
+
+  const { error } = await supabaseAdmin
+    .from('print_jobs')
+    .update(updates)
+    .eq('id', jobId);
+
+  if (error) {
+    console.error('[DB] updatePrintJobConfig error:', error.message);
+  }
 }
 
 /**
