@@ -146,7 +146,7 @@ export async function handleGetKioskStatus(kioskId: string) {
     : null;
 
   // Permanent public QR URL that customers scan to initiate their own isolated session
-  const permanentQrUrl = `/print/${org?.slug || 'gitam'}/${kiosk.kiosk_slug || kiosk.id.toLowerCase()}`;
+  const permanentQrUrl = `/print?kiosk_id=${kiosk.id}`;
 
   return NextResponse.json({
     success: true,

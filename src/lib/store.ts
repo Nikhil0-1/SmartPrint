@@ -147,7 +147,7 @@ class StateManager {
         organization_id: GITAM_ORG_ID,
         location_id: 'loc-gitam-01',
         kiosk_slug: k.id.toLowerCase(),
-        permanent_qr_url: `/print/gitam/${k.id.toLowerCase()}`,
+        permanent_qr_url: `/print?kiosk_id=${k.id}`,
       });
     });
 

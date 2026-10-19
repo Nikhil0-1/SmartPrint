@@ -86,6 +86,13 @@ export default function KioskMonitorPage({
   const [completedCountdown, setCompletedCountdown] = useState<number>(8);
   const [realtimeConnected, setRealtimeConnected] = useState<boolean>(false);
   const [networkError, setNetworkError] = useState<boolean>(false);
+  const [clientOrigin, setClientOrigin] = useState<string>('https://smart-prints.vercel.app');
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.origin) {
+      setClientOrigin(window.location.origin);
+    }
+  }, []);
 
   // Live Clock Tick
   useEffect(() => {
@@ -225,12 +232,9 @@ export default function KioskMonitorPage({
 
   const displayOrg = branding.organization.replace(new RegExp(`\\s*${branding.product}$`, 'i'), '').trim() || branding.organization;
 
-  // Permanent Kiosk QR Target URL (Public entry point - Never cycling session tokens in QR)
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const permanentQrTarget =
-    data?.kiosk?.permanent_qr_url && origin
-      ? `${origin}${data.kiosk.permanent_qr_url}`
-      : `${origin}/print?kiosk=${kioskId}`;
+  // Permanent Kiosk QR Target URL (Guaranteed absolute URL starting with https://)
+  // Ensures smartphone cameras immediately recognize it as a valid web link
+  const permanentQrTarget = `${clientOrigin}/print?kiosk_id=${encodeURIComponent(kioskId)}`;
 
   return (
     <div className="h-screen w-screen bg-[#fafbfc] text-slate-900 flex flex-col justify-between p-3 sm:p-5 select-none cursor-none overflow-hidden font-sans fixed inset-0 border-4 sm:border-8 border-slate-100">
@@ -279,24 +283,38 @@ export default function KioskMonitorPage({
           <div className="grid grid-cols-1 md:grid-cols-12 gap-5 lg:gap-8 items-center max-w-5xl w-full my-auto px-2">
             {/* PERMANENT QR CODE CARD */}
             <div className="md:col-span-5 flex justify-center">
-              <div className="bg-white p-4 sm:p-5 rounded-2xl sm:rounded-3xl shadow-lg border-2 border-amber-500/40 flex flex-col items-center justify-center w-full max-w-[270px]">
-                <div className="bg-white p-2.5 rounded-xl border border-slate-100 shadow-inner flex items-center justify-center">
+              <div className="bg-white p-4 sm:p-5 rounded-2xl sm:rounded-3xl shadow-lg border-2 border-amber-500/40 flex flex-col items-center justify-center w-full max-w-[280px]">
+                <a
+                  href={permanentQrTarget}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="bg-white p-2 rounded-xl border border-slate-200 shadow-inner flex items-center justify-center hover:scale-[1.02] transition-transform cursor-pointer"
+                  title="Click or Scan to open Print Portal"
+                >
                   <QRCodeSVG
                     value={permanentQrTarget}
-                    size={185}
-                    level="H"
-                    includeMargin={false}
-                    className="w-40 h-40 sm:w-44 sm:h-44"
+                    size={200}
+                    level="M"
+                    includeMargin={true}
+                    className="w-44 h-44 sm:w-48 sm:h-48"
                   />
-                </div>
+                </a>
 
-                <div className="mt-3 text-center">
+                <div className="mt-3 text-center w-full px-2">
                   <span className="text-[11px] sm:text-xs font-black text-slate-900 uppercase tracking-widest block">
                     SCAN TO START PRINTING
                   </span>
                   <span className="text-[10px] sm:text-[11px] font-medium text-slate-500 block mt-0.5">
                     Point phone camera at QR code
                   </span>
+                  <a
+                    href={permanentQrTarget}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block mt-2 text-[10px] text-amber-600 hover:text-amber-700 font-mono font-bold underline truncate max-w-full"
+                  >
+                    /print?kiosk_id={kioskId}
+                  </a>
                 </div>
               </div>
             </div>
