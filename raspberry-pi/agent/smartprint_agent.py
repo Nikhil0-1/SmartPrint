@@ -138,16 +138,18 @@ def mark_job_processed_locally(job_id, idempotency_key, status, cups_job_id=None
 
 
 def get_system_telemetry():
-    """Reads Raspberry Pi CPU temperature, RAM usage, and Disk usage."""
-    cpu_temp = 0.0
-    ram_usage = 0.0
-    disk_usage = 0.0
+    """Reads Raspberry Pi CPU temperature, RAM usage, and Disk usage. Returns None for unavailable metrics."""
+    cpu_temp = None
+    ram_usage = None
+    disk_usage = None
 
     # CPU Temp
     try:
         if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
             with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                cpu_temp = round(float(f.read().strip()) / 1000.0, 1)
+                raw = f.read().strip()
+                if raw:
+                    cpu_temp = round(float(raw) / 1000.0, 1)
     except Exception:
         pass
 
@@ -162,20 +164,82 @@ def get_system_telemetry():
                         key = parts[0].strip()
                         val = parts[1].strip().split()[0]
                         mem[key] = int(val)
-            total = mem.get("MemTotal", 1)
+            total = mem.get("MemTotal", 0)
             free = mem.get("MemAvailable", mem.get("MemFree", 0))
-            ram_usage = round(((total - free) / total) * 100.0, 1)
+            if total > 0:
+                ram_usage = round(((total - free) / total) * 100.0, 1)
     except Exception:
         pass
 
     # Disk Usage
     try:
         total, used, free = shutil.disk_usage("/")
-        disk_usage = round((used / total) * 100.0, 1)
+        if total > 0:
+            disk_usage = round((used / total) * 100.0, 1)
     except Exception:
         pass
 
     return cpu_temp, ram_usage, disk_usage
+
+
+def get_hardware_model():
+    """
+    Dynamically identifies the physical Raspberry Pi hardware model.
+    Reads official Linux device-tree and cpuinfo interfaces, avoiding hardcoded values.
+    """
+    # 1. Device Tree Model (authoritative on Raspberry Pi OS Linux)
+    for dt_path in ("/proc/device-tree/model", "/sys/firmware/devicetree/base/model"):
+        if os.path.exists(dt_path):
+            try:
+                with open(dt_path, "r", encoding="utf-8", errors="ignore") as f:
+                    raw_model = f.read().replace("\x00", "").strip()
+                    if raw_model:
+                        return raw_model
+            except Exception:
+                pass
+
+    # 2. Check /proc/cpuinfo (Model line)
+    if os.path.exists("/proc/cpuinfo"):
+        try:
+            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if line.startswith("Model"):
+                        parts = line.split(":", 1)
+                        if len(parts) == 2 and parts[1].strip():
+                            return parts[1].strip()
+        except Exception:
+            pass
+
+    # 3. Environment or config override if explicitly configured
+    env_model = os.getenv("SMARTPRINT_HARDWARE_MODEL")
+    if env_model:
+        return env_model.strip()
+
+    return None
+
+
+def get_local_ip():
+    """Detects primary local network IP address of the device."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    return None
 
 
 def secure_wipe_file(file_path):
@@ -316,22 +380,37 @@ class SmartPrintAgent:
 
         cpu_temp, ram_pct, disk_pct = get_system_telemetry()
         printer_status, printer_msg = self.cups.get_queue_status()
+        hw_model = get_hardware_model() or self.config.get("hardware_model")
+        local_ip = get_local_ip() or self.config.get("ip_address")
 
         telemetry = {
             "kiosk_id": self.config["kiosk_id"],
-            "cpu_temp": cpu_temp,
-            "ram_usage": ram_pct,
-            "disk_usage": disk_pct,
-            "printer_status": printer_status,
-            "printer_message": printer_msg,
             "agent_version": "1.0.0"
         }
+        if cpu_temp is not None:
+            telemetry["cpu_temp"] = cpu_temp
+        if ram_pct is not None:
+            telemetry["ram_usage"] = ram_pct
+        if disk_pct is not None:
+            telemetry["disk_usage"] = disk_pct
+        if printer_status:
+            telemetry["printer_status"] = printer_status
+        if printer_msg:
+            telemetry["printer_message"] = printer_msg
+        if hw_model:
+            telemetry["hardware_model"] = hw_model
+        if local_ip:
+            telemetry["ip_address"] = local_ip
 
         res = self.make_api_request("/api/kiosk/heartbeat", payload=telemetry, method="POST")
         if res.get("success"):
             data = res.get("data", {})
+            temp_str = f"{cpu_temp}°C" if cpu_temp is not None else "N/A"
+            ram_str = f"{ram_pct}%" if ram_pct is not None else "N/A"
+            disk_str = f"{disk_pct}%" if disk_pct is not None else "N/A"
             logging.info(
-                f"Heartbeat OK | Temp: {cpu_temp}°C | RAM: {ram_pct}% | Disk: {disk_pct}% | Printer: {printer_status}"
+                f"Heartbeat OK | Model: {hw_model or 'N/A'} | IP: {local_ip or 'N/A'} | "
+                f"Temp: {temp_str} | RAM: {ram_str} | Disk: {disk_str} | Printer: {printer_status}"
             )
             if data.get("maintenance_mode"):
                 logging.warning("Kiosk is currently in MAINTENANCE MODE.")

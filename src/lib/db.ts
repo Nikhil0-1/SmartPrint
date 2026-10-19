@@ -108,6 +108,7 @@ export interface DbKiosk {
   kiosk_slug: string | null;
   active_job_id: string | null;
   updated_at: string;
+  hardware_model?: string | null;
 }
 
 export interface DbPrinter {
@@ -554,6 +555,14 @@ export async function dbUpsertPaymentConfig(
 
 export async function dbGetKiosks(organizationId?: string): Promise<DbKiosk[]> {
   if (!isConfigured()) return [];
+
+  // Enforce background offline sweep using intended threshold (2 minutes)
+  try {
+    await dbMarkKiosksOffline(2);
+  } catch (err) {
+    console.warn('[DB] Automatic offline check in dbGetKiosks warning:', err);
+  }
+
   let query = supabaseAdmin.from('kiosks').select('*').order('id', { ascending: true });
   if (organizationId) query = query.eq('organization_id', organizationId);
   const { data, error } = await query;
@@ -561,7 +570,36 @@ export async function dbGetKiosks(organizationId?: string): Promise<DbKiosk[]> {
     console.error('[DB] getKiosks error:', error.message);
     return [];
   }
-  return data || [];
+
+  // Load dynamic edge telemetry and hardware model information from settings
+  let hwMap: Record<string, any> = {};
+  try {
+    const { data: hwSetting } = await supabaseAdmin
+      .from('settings')
+      .select('value')
+      .eq('key', 'kiosk_hardware_info')
+      .single();
+    if (hwSetting?.value) {
+      hwMap = hwSetting.value as Record<string, any>;
+    }
+  } catch {
+    // Non-fatal if settings key not yet created
+  }
+
+  const cutoffMs = Date.now() - 2 * 60 * 1000;
+  return (data || []).map((kiosk) => {
+    let effectiveStatus = kiosk.status;
+    const isStale = !kiosk.last_heartbeat || new Date(kiosk.last_heartbeat).getTime() < cutoffMs;
+    if (isStale && effectiveStatus !== 'MAINTENANCE' && effectiveStatus !== 'DISABLED') {
+      effectiveStatus = 'OFFLINE';
+    }
+
+    return {
+      ...kiosk,
+      status: effectiveStatus,
+      hardware_model: hwMap[kiosk.id]?.hardware_model || null,
+    };
+  });
 }
 
 export async function dbGetKiosk(id: string): Promise<DbKiosk | null> {
@@ -572,6 +610,28 @@ export async function dbGetKiosk(id: string): Promise<DbKiosk | null> {
     .eq('id', id)
     .single();
   if (error) return null;
+
+  // Retrieve hardware model if stored
+  try {
+    const { data: hwSetting } = await supabaseAdmin
+      .from('settings')
+      .select('value')
+      .eq('key', 'kiosk_hardware_info')
+      .single();
+    if (hwSetting?.value) {
+      const hwMap = hwSetting.value as Record<string, any>;
+      data.hardware_model = hwMap[id]?.hardware_model || null;
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  const cutoffMs = Date.now() - 2 * 60 * 1000;
+  const isStale = !data.last_heartbeat || new Date(data.last_heartbeat).getTime() < cutoffMs;
+  if (isStale && data.status !== 'MAINTENANCE' && data.status !== 'DISABLED') {
+    data.status = 'OFFLINE';
+  }
+
   return data;
 }
 
@@ -608,12 +668,31 @@ export async function dbUpdateKioskStatus(kioskId: string, status: string): Prom
 export async function dbMarkKiosksOffline(thresholdMinutes = 2): Promise<void> {
   if (!isConfigured()) return;
   const cutoff = new Date(Date.now() - thresholdMinutes * 60 * 1000).toISOString();
-  await supabaseAdmin
-    .from('kiosks')
-    .update({ status: 'OFFLINE', updated_at: new Date().toISOString() })
-    .lt('last_heartbeat', cutoff)
-    .neq('status', 'MAINTENANCE')
-    .neq('status', 'DISABLED');
+
+  // Mark kiosks offline where heartbeat is older than cutoff OR null
+  try {
+    await supabaseAdmin
+      .from('kiosks')
+      .update({ status: 'OFFLINE', updated_at: new Date().toISOString() })
+      .or(`last_heartbeat.lt.${cutoff},last_heartbeat.is.null`)
+      .neq('status', 'MAINTENANCE')
+      .neq('status', 'DISABLED')
+      .neq('status', 'OFFLINE');
+  } catch (err) {
+    console.warn('[DB] dbMarkKiosksOffline kiosks error:', err);
+  }
+
+  try {
+    await supabaseAdmin
+      .from('devices')
+      .update({ status: 'OFFLINE', updated_at: new Date().toISOString() })
+      .or(`last_heartbeat.lt.${cutoff},last_heartbeat.is.null`)
+      .neq('status', 'MAINTENANCE')
+      .neq('status', 'REVOKED')
+      .neq('status', 'OFFLINE');
+  } catch (err) {
+    console.warn('[DB] dbMarkKiosksOffline devices error:', err);
+  }
 }
 
 // ─── Devices ──────────────────────────────────────────────────────────────────

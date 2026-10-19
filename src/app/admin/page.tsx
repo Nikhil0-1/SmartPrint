@@ -86,7 +86,7 @@ function AdminDashboardContent({
   const initialLoadDone = useRef(false);
   const lastSaveTimeRef = useRef(0);
 
-  // Form states for editable sections
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [pricingForm, setPricingForm] = useState(DEFAULT_PRICING);
   const [brandingForm, setBrandingForm] = useState(DEFAULT_BRANDING);
   const [isSimulating, setIsSimulating] = useState(false);
@@ -124,19 +124,27 @@ function AdminDashboardContent({
     return {};
   };
 
-  const fetchAdminData = async () => {
+  const fetchAdminData = async (isManual = false) => {
+    if (isManual) setIsRefreshing(true);
     try {
       const authHeaders = await getAuthHeaders();
       if (!authHeaders.Authorization) {
+        if (isManual) showToast('Authentication required to refresh data.', 'error');
         return;
       }
-      const slugQuery = slugParam ? `?slug=${encodeURIComponent(slugParam)}` : '';
+      const slugQuery = slugParam
+        ? `?slug=${encodeURIComponent(slugParam)}&_t=${Date.now()}`
+        : `?_t=${Date.now()}`;
       const res = await fetch(`/api/admin/data${slugQuery}`, {
         headers: { ...authHeaders },
+        cache: 'no-store',
       });
       const data = await res.json();
       if (res.ok && data) {
         setAdminData(data);
+        if (isManual) {
+          showToast('Data refreshed successfully from server!');
+        }
         if (!initialLoadDone.current) {
           if (data.pricing) setPricingForm(data.pricing);
           if (data.branding) setBrandingForm(data.branding);
@@ -160,10 +168,15 @@ function AdminDashboardContent({
             }));
           }
         }
+      } else {
+        const errorMsg = data?.error || 'Failed to refresh data from server.';
+        if (isManual) showToast(errorMsg, 'error');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load admin data:', err);
+      if (isManual) showToast(err?.message || 'Network error fetching data', 'error');
     } finally {
+      if (isManual) setIsRefreshing(false);
       setLoading(false);
     }
   };
@@ -564,11 +577,13 @@ function AdminDashboardContent({
             </div>
 
             <button
-              onClick={() => fetchAdminData()}
-              className="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-colors"
+              onClick={() => fetchAdminData(true)}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 disabled:opacity-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-colors"
+              title="Fetch fresh server data"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Refresh</span>
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-blue-600' : ''}`} />
+              <span>{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
             </button>
 
             <button
@@ -741,58 +756,89 @@ function AdminDashboardContent({
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-base font-bold text-slate-900">Active Kiosks</h3>
-                  <p className="text-xs text-slate-500">Raspberry Pi 3B+ devices registered in network</p>
+                  <p className="text-xs text-slate-500">Registered edge kiosk controllers and live telemetry</p>
                 </div>
               </div>
 
               <div className="divide-y divide-slate-100">
-                {(adminData?.kiosks || []).map((kiosk: any) => (
-                  <div key={kiosk.id} className="py-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-sm text-slate-900">{kiosk.id}</span>
-                        <span className="text-xs font-semibold text-slate-700">— {kiosk.name}</span>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            kiosk.status === 'ONLINE'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-amber-100 text-amber-800'
+                {(adminData?.kiosks || []).map((kiosk: any) => {
+                  const now = Date.now();
+                  const hbTime = kiosk.last_heartbeat ? new Date(kiosk.last_heartbeat).getTime() : 0;
+                  const diffSec = hbTime > 0 ? Math.floor((now - hbTime) / 1000) : -1;
+                  const isStale = diffSec < 0 || diffSec >= 120; // 2 minutes threshold
+
+                  let relativeHb = 'Never';
+                  if (diffSec >= 0) {
+                    if (diffSec < 60) relativeHb = `${diffSec}s ago`;
+                    else if (diffSec < 3600) relativeHb = `${Math.floor(diffSec / 60)}m ago`;
+                    else if (diffSec < 86400) relativeHb = `${Math.floor(diffSec / 3600)}h ago`;
+                    else relativeHb = `${Math.floor(diffSec / 86400)}d ago`;
+                  }
+
+                  const isMaintenance = Boolean(kiosk.maintenance_mode);
+                  const isOnline = kiosk.status === 'ONLINE' && !isStale;
+
+                  return (
+                    <div key={kiosk.id} className="py-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                      <div className="space-y-1.5 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono font-bold text-sm text-slate-900">{kiosk.id}</span>
+                          <span className="text-xs font-semibold text-slate-700">— {kiosk.name}</span>
+                          <span
+                            className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${
+                              isMaintenance
+                                ? 'bg-amber-100 text-amber-800 border-amber-200'
+                                : isOnline
+                                ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                : 'bg-slate-100 text-slate-700 border-slate-200'
+                            }`}
+                          >
+                            {isMaintenance ? 'MAINTENANCE' : isOnline ? 'ONLINE' : 'OFFLINE'}
+                          </span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-md bg-slate-50 text-slate-600 border border-slate-200">
+                            Model: <strong className="text-slate-800 font-medium">{kiosk.hardware_model || 'N/A'}</strong>
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-500">Location: {kiosk.location}</p>
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-600 font-mono">
+                          <span>IP: <strong className="text-slate-900">{kiosk.ip_address || 'N/A'}</strong></span>
+                          <span>Temp: <strong className="text-slate-900">{kiosk.cpu_temp_celsius != null ? `${Number(kiosk.cpu_temp_celsius).toFixed(1)}°C` : 'N/A'}</strong></span>
+                          <span>RAM: <strong className="text-slate-900">{kiosk.ram_usage_percent != null ? `${Number(kiosk.ram_usage_percent).toFixed(1)}%` : 'N/A'}</strong></span>
+                          <span>Disk: <strong className="text-slate-900">{kiosk.disk_usage_percent != null ? `${Number(kiosk.disk_usage_percent).toFixed(1)}%` : 'N/A'}</strong></span>
+                          <span className="text-slate-300">|</span>
+                          <span className={`font-sans ${isStale ? 'text-amber-800' : 'text-slate-500'}`}>
+                            Heartbeat: <strong>{kiosk.last_heartbeat ? new Date(kiosk.last_heartbeat).toLocaleString() : 'Never'}</strong> ({relativeHb}{isStale && diffSec >= 0 ? ' - stale' : ''})
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => handleToggleMaintenance(kiosk.id, kiosk.maintenance_mode)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                            kiosk.maintenance_mode
+                              ? 'bg-amber-600 text-white border-amber-600'
+                              : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
                           }`}
                         >
-                          {kiosk.status}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-500">Location: {kiosk.location}</p>
-                      <div className="flex items-center gap-4 text-[11px] text-slate-500 font-mono">
-                        <span>IP: {kiosk.ip_address}</span>
-                        <span>Temp: {kiosk.cpu_temp_celsius}°C</span>
-                        <span>RAM: {kiosk.ram_usage_percent}%</span>
-                        <span>Disk: {kiosk.disk_usage_percent}%</span>
+                          {kiosk.maintenance_mode ? 'End Maintenance' : 'Set Maintenance'}
+                        </button>
+                        <div className="flex flex-col items-end">
+                          <Link
+                            href={`/kiosk/${kiosk.id}`}
+                            target="_blank"
+                            title="Web-based HDMI kiosk screen preview. Note: This verifies the Chromium web display UI, not physical HDMI cable handshake."
+                            className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-500 transition-colors flex items-center gap-1"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            <span>View HDMI</span>
+                          </Link>
+                          <span className="text-[9px] text-slate-400 mt-0.5">Web UI Preview</span>
+                        </div>
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => handleToggleMaintenance(kiosk.id, kiosk.maintenance_mode)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
-                          kiosk.maintenance_mode
-                            ? 'bg-amber-600 text-white border-amber-600'
-                            : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        {kiosk.maintenance_mode ? 'End Maintenance' : 'Set Maintenance'}
-                      </button>
-                      <Link
-                        href={`/kiosk/${kiosk.id}`}
-                        target="_blank"
-                        className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-500 transition-colors flex items-center gap-1"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        <span>View HDMI</span>
-                      </Link>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1613,7 +1659,7 @@ function AdminDashboardContent({
               <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-base font-bold text-slate-900">Raspberry Pi 3B+ Hardware Simulator</h3>
+                    <h3 className="text-base font-bold text-slate-900">Raspberry Pi Edge Hardware Simulator</h3>
                     <p className="text-xs text-slate-500">
                       Test end-to-end hardware printing & telemetry when physical Pi/printer is not connected
                     </p>

@@ -54,6 +54,15 @@ if [ -n "$ORG_ID" ]; then
 fi
 
 # --- 1. VERIFY CREDENTIALS AGAINST BACKEND SERVER ---
+echo "[INFO] Detecting local hardware model..."
+DETECTED_MODEL="Raspberry Pi 4 Model B"
+if [ -f /proc/device-tree/model ]; then
+    DETECTED_MODEL=$(tr -d '\0' < /proc/device-tree/model)
+elif [ -f /sys/firmware/devicetree/base/model ]; then
+    DETECTED_MODEL=$(tr -d '\0' < /sys/firmware/devicetree/base/model)
+fi
+echo "[INFO] Detected Model:   $DETECTED_MODEL"
+
 echo "[INFO] Verifying device credentials with backend..."
 HEARTBEAT_ENDPOINT="${BACKEND_URL%/}/api/kiosk/heartbeat"
 
@@ -61,7 +70,7 @@ HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$HEARTBEAT_ENDPOINT" \
     -H "Content-Type: application/json" \
     -H "X-Kiosk-Id: $KIOSK_ID" \
     -H "X-Device-Token: $DEVICE_TOKEN" \
-    -d "{\"kiosk_id\":\"$KIOSK_ID\",\"agent_version\":\"1.0.0\"}" || echo -e "\n000")
+    -d "{\"kiosk_id\":\"$KIOSK_ID\",\"agent_version\":\"1.0.0\",\"hardware_model\":\"$DETECTED_MODEL\"}" || echo -e "\n000")
 
 HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
 HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n1)
@@ -91,6 +100,7 @@ cat <<EOF > "$CONFIG_FILE"
   "organization_id": "$ORG_ID",
   "kiosk_id": "$KIOSK_ID",
   "device_token": "$DEVICE_TOKEN",
+  "hardware_model": "$DETECTED_MODEL",
   "poll_interval_sec": 4,
   "heartbeat_interval_sec": 10,
   "verify_ssl": true,

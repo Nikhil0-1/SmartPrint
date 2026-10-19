@@ -163,6 +163,7 @@ export interface Kiosk {
   maintenance_mode: boolean;
   permanent_qr_url?: string;
   active_job_id?: string | null;
+  hardware_model?: string | null;
 }
 
 export type PrinterType = 'BW' | 'COLOR' | 'BOTH' | 'BACKUP';
