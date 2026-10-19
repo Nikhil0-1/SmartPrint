@@ -68,12 +68,15 @@ export async function POST(request: Request) {
           updated_at: new Date().toISOString(),
         };
 
-        await supabaseAdmin.from('settings').upsert({
-          key: 'kiosk_hardware_info',
-          value: currentMap,
-          description: 'Dynamic hardware model and edge telemetry per kiosk',
-          updated_at: new Date().toISOString(),
-        });
+        await supabaseAdmin.from('settings').upsert(
+          {
+            key: 'kiosk_hardware_info',
+            value: currentMap,
+            description: 'Dynamic hardware model and edge telemetry per kiosk',
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'key' }
+        );
       } catch (err) {
         console.warn('[HEARTBEAT] Failed to update hardware info in settings:', err);
       }

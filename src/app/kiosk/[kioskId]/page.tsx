@@ -307,14 +307,6 @@ export default function KioskMonitorPage({
                   <span className="text-[10px] sm:text-[11px] font-medium text-slate-500 block mt-0.5">
                     Point phone camera at QR code
                   </span>
-                  <a
-                    href={permanentQrTarget}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-block mt-2 text-[10px] text-amber-600 hover:text-amber-700 font-mono font-bold underline truncate max-w-full"
-                  >
-                    /print?kiosk_id={kioskId}
-                  </a>
                 </div>
               </div>
             </div>

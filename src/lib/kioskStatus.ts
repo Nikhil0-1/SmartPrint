@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
 import { KioskMonitorState, PrintJob } from '@/lib/types';
+import { dbGetKiosk, dbGetOrganization, dbGetBranding, dbGetPricing } from '@/lib/db';
 
 export function maskJobId(id: string): string {
   if (!id) return 'SP-****';
@@ -104,15 +105,26 @@ export async function handleGetKioskStatus(kioskId: string) {
     return NextResponse.json({ error: 'Kiosk ID is required' }, { status: 400 });
   }
 
-  const kiosk = store.getKiosk(kioskId);
+  const dbKiosk = await dbGetKiosk(kioskId);
+  const kiosk = dbKiosk || store.getKiosk(kioskId);
   if (!kiosk) {
     return NextResponse.json({ error: 'Kiosk not found' }, { status: 404 });
   }
 
   const orgId = kiosk.organization_id || GITAM_ORG_ID;
-  const org = store.getOrganization(orgId);
-  const branding = store.getBranding(orgId);
-  const pricing = store.getPricing(orgId);
+  const dbOrg = await dbGetOrganization(orgId);
+  const org = dbOrg || store.getOrganization(orgId);
+
+  const dbBranding = await dbGetBranding(orgId);
+  const branding = dbBranding || store.getBranding(orgId);
+
+  const dbPricing = await dbGetPricing(orgId);
+  const storePricing = store.getPricing(orgId);
+  const pricing = dbPricing || storePricing;
+
+  if (dbPricing) {
+    store.updatePricing(orgId, dbPricing as any, 'system');
+  }
 
   // Get default printer for this kiosk
   const printers = store.getPrinters(orgId, kioskId);
@@ -179,9 +191,9 @@ export async function handleGetKioskStatus(kioskId: string) {
       },
     },
     pricing: {
-      bw_price_per_page: pricing.bw_price_per_page || 1.0,
-      color_price_per_page: pricing.color_price_per_page || 5.0,
-      currency: pricing.currency || 'INR',
+      bw_price_per_page: Number(pricing?.bw_price_per_page ?? 1.0),
+      color_price_per_page: Number(pricing?.color_price_per_page ?? 5.0),
+      currency: (pricing as any)?.currency || 'INR',
     },
     printer: {
       status: printerStatus,

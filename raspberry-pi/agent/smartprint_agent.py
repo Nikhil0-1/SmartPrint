@@ -189,26 +189,33 @@ def get_hardware_model():
     """
     # 1. Device Tree Model (authoritative on Raspberry Pi OS Linux)
     for dt_path in ("/proc/device-tree/model", "/sys/firmware/devicetree/base/model"):
-        if os.path.exists(dt_path):
-            try:
-                with open(dt_path, "r", encoding="utf-8", errors="ignore") as f:
-                    raw_model = f.read().replace("\x00", "").strip()
-                    if raw_model:
-                        return raw_model
-            except Exception:
-                pass
-
-    # 2. Check /proc/cpuinfo (Model line)
-    if os.path.exists("/proc/cpuinfo"):
         try:
-            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    if line.startswith("Model"):
-                        parts = line.split(":", 1)
-                        if len(parts) == 2 and parts[1].strip():
-                            return parts[1].strip()
+            if os.path.exists(dt_path):
+                try:
+                    with open(dt_path, "rb") as f:
+                        raw = f.read().decode("utf-8", errors="ignore").replace("\x00", "").strip()
+                        if raw:
+                            return raw
+                except Exception:
+                    with open(dt_path, "r", encoding="utf-8", errors="ignore") as f:
+                        raw = f.read().replace("\x00", "").strip()
+                        if raw:
+                            return raw
         except Exception:
             pass
+
+    # 2. Check /proc/cpuinfo (Model line fallback)
+    try:
+        if os.path.exists("/proc/cpuinfo"):
+            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("Model"):
+                        parts = stripped.split(":", 1)
+                        if len(parts) == 2 and parts[1].strip():
+                            return parts[1].strip()
+    except Exception:
+        pass
 
     # 3. Environment or config override if explicitly configured
     env_model = os.getenv("SMARTPRINT_HARDWARE_MODEL")
