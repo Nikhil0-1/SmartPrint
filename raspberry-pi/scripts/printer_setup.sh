@@ -1,93 +1,81 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# GITAM SMARTPRINT - USB HP PRINTER DETECTION & CUPS CONFIGURATION SCRIPT
-# Automatically discovers USB HP printers and registers the CUPS print queue.
+# GITAM SMARTPRINT - HP LASER 108W / IPP-USB CUPS PRINTER SETUP (v3.0)
+# Automatically configures HP Laser 108w via ipp-usb (ipp://127.0.0.1:60000/ipp/print)
+# Configures strict monochrome parameters, enables queue, and sets system default.
 # ==============================================================================
 
-set -e
+set -eo pipefail
 
-QUEUE_NAME="HP_LaserJet_USB"
+QUEUE_NAME="${SMARTPRINT_CUPS_QUEUE:-"HP_Laser_108w"}"
+IPP_USB_ENDPOINT="ipp://127.0.0.1:60000/ipp/print"
 
 echo "=================================================="
-echo "    HP USB PRINTER DETECTION & CUPS SETUP        "
+echo "    GITAM SMARTPRINT - HP LASER 108W SETUP       "
+echo "    Target Queue: $QUEUE_NAME                     "
 echo "=================================================="
 
-# Check root
+# Check root permissions
 if [ "$EUID" -ne 0 ]; then
   echo "[-] Please run as root: sudo bash printer_setup.sh"
   exit 1
 fi
 
-echo "[1/5] Checking USB bus for connected HP Printers..."
-lsusb | grep -i "Hewlett-Packard\|HP\|Printer" || {
-  echo "[-] WARNING: No HP printer found on USB bus."
-  echo "    Please verify cable connection and power state."
+echo "[1/5] Checking USB bus for HP Laser 108w..."
+lsusb | grep -i "Hewlett-Packard\|HP\|03f0:\|04e8:" || {
+  echo "[-] WARNING: HP printer not detected on USB bus."
+  echo "    Verify power cable and USB data cable connection."
 }
 
-echo "[2/5] Querying CUPS hardware interfaces (lpinfo)..."
-mapfile -t DETECTED_URIS < <(lpinfo -v | grep -i "usb://" | awk '{print $2}')
-
-if [ ${#DETECTED_URIS[@]} -eq 0 ]; then
-  echo "[-] Could not detect USB printer URIs via CUPS lpinfo."
-  echo "    Falling back to standard USB URI: usb://HP/LaserJet"
-  DETECTED_URIS=("usb://HP/LaserJet")
+echo "[2/5] Checking ipp-usb daemon..."
+if systemctl is-active --quiet ipp-usb; then
+  echo "[+] ipp-usb service is ACTIVE"
+else
+  echo "[*] Starting ipp-usb service..."
+  systemctl start ipp-usb 2>/dev/null || echo "[-] ipp-usb service start warning."
 fi
 
-echo "[+] Detected ${#DETECTED_URIS[@]} USB printer endpoint(s):"
-for index in "${!DETECTED_URIS[@]}"; do
-  echo "    [$((index+1))] ${DETECTED_URIS[$index]}"
-done
-
-echo "[3/5] Configuring CUPS Queues for Multi-Printer Kiosk..."
-
-# Queue 1: B&W Primary Queue
-BW_QUEUE="smartprint_bw_01"
-BW_URI="${DETECTED_URIS[0]}"
-HPCUPS_DRIVER=$(lpinfo -m | grep -i "hpcups.*laserjet" | head -n 1 | awk '{print $1}')
-if [ -z "$HPCUPS_DRIVER" ]; then
-  HPCUPS_DRIVER="drv:///sample.drv/generic.ppd"
+# Determine device URI (prefer ipp-usb endpoint if active)
+DEVICE_URI="$IPP_USB_ENDPOINT"
+if command -v curl &>/dev/null; then
+  if ! curl -s --connect-timeout 2 http://127.0.0.1:60000/ipp/print >/dev/null 2>&1; then
+    echo "[*] ipp-usb endpoint not responding on 60000. Checking lpinfo -v..."
+    DETECTED_URI=$(lpinfo -v 2>/dev/null | grep -i "usb://\|ipp://.*60000" | awk '{print $2}' | head -n 1 || true)
+    if [ -n "$DETECTED_URI" ]; then
+      DEVICE_URI="$DETECTED_URI"
+    fi
+  fi
 fi
 
-echo "[+] Registering B&W Queue: $BW_QUEUE -> $BW_URI"
-lpadmin -x "$BW_QUEUE" 2>/dev/null || true
-lpadmin -p "$BW_QUEUE" -E -v "$BW_URI" -m "$HPCUPS_DRIVER" -D "GITAM SmartPrint HP B&W Primary" -L "Kiosk 01 Tray 1"
-cupsenable "$BW_QUEUE"
-cupsaccept "$BW_QUEUE"
-lpoptions -p "$BW_QUEUE" -o media=A4 -o ColorModel=K
+echo "[3/5] Device URI configured: $DEVICE_URI"
 
-# Queue 2: Color Primary Queue (if 2nd printer or color printer detected)
-COLOR_QUEUE="smartprint_color_01"
-COLOR_URI="${DETECTED_URIS[1]:-$BW_URI}"
-echo "[+] Registering Color Queue: $COLOR_QUEUE -> $COLOR_URI"
-lpadmin -x "$COLOR_QUEUE" 2>/dev/null || true
-lpadmin -p "$COLOR_QUEUE" -E -v "$COLOR_URI" -m "$HPCUPS_DRIVER" -D "GITAM SmartPrint HP Color Primary" -L "Kiosk 01 Tray 2"
-cupsenable "$COLOR_QUEUE"
-cupsaccept "$COLOR_QUEUE"
-lpoptions -p "$COLOR_QUEUE" -o media=A4 -o ColorModel=Color
+echo "[4/5] Registering CUPS queue: $QUEUE_NAME..."
+# Remove any conflicting older queue
+lpadmin -x "$QUEUE_NAME" 2>/dev/null || true
 
-# Set B&W as system default queue
-lpadmin -d "$BW_QUEUE"
+# Register queue with IPP everywhere driverless support
+lpadmin -p "$QUEUE_NAME" -E -v "$DEVICE_URI" -m everywhere \
+  -D "GITAM SmartPrint HP Laser 108w" \
+  -L "Campus Kiosk 01" 2>/dev/null || \
+lpadmin -p "$QUEUE_NAME" -E -v "$DEVICE_URI" -m drv:///sample.drv/generic.ppd \
+  -D "GITAM SmartPrint HP Laser 108w" \
+  -L "Campus Kiosk 01"
 
-echo "[+] Multi-Printer CUPS queues successfully configured!"
+# Enable queue and accept jobs
+cupsenable "$QUEUE_NAME"
+cupsaccept "$QUEUE_NAME"
 
-echo "[+] Printer queue '$QUEUE_NAME' registered and enabled!"
+# Configure strict monochrome options (HP Laser 108w is strictly monochrome)
+lpoptions -p "$QUEUE_NAME" -o media=A4 -o ColorModel=Gray -o print-color-mode=monochrome
 
-echo "[5/5] Checking printer status via lpstat..."
+# Set as system default queue
+lpadmin -d "$QUEUE_NAME"
+echo "[+] '$QUEUE_NAME' configured and set as system default queue."
+
+echo "[5/5] Verifying queue status..."
 lpstat -p "$QUEUE_NAME"
 lpstat -d
 
 echo "=================================================="
-echo "Would you like to print a test page now? (y/N)"
-read -r -t 10 DO_TEST || DO_TEST="n"
-
-if [[ "$DO_TEST" =~ ^[Yy]$ ]]; then
-  echo "[*] Sending test page to $QUEUE_NAME..."
-  lp -d "$QUEUE_NAME" /usr/share/cups/data/testprint || echo "[-] Test page submission failed. Check CUPS logs."
-  echo "[+] Test job submitted. Verify physical output on HP printer."
-else
-  echo "[*] Skipping test print."
-fi
-
-echo "=================================================="
-echo "✓ PRINTER SETUP COMPLETED!"
+echo "✓ PRINTER SETUP COMPLETED FOR $QUEUE_NAME"
 echo "=================================================="

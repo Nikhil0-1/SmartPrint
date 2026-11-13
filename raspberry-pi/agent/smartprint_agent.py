@@ -1,48 +1,74 @@
 #!/usr/bin/env python3
 """
-GITAM SMARTPRINT - Raspberry Pi Production Agent
-Handles device authentication, heartbeat telemetry, FIFO job polling,
-secure temporary download with TLS verification, CUPS print execution,
-verified completion, and immediate secure document destruction.
+GITAM SMARTPRINT - Raspberry Pi Production Agent (v3.0)
+Durable state-machine driven agent for autonomous campus printing.
+Guarantees zero duplicate prints, crash safety, reliable cloud reporting with outbox,
+pre-flight queue validation for HP Laser 108w, and bounded privacy retention.
 """
 
 import os
 import sys
 import time
 import json
-import shutil
+import signal
 import logging
-import sqlite3
-import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
-from pathlib import Path
+from typing import Optional, Dict, Any, Tuple
 
-# Import local CUPS controller
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from cups_controller import CupsController
+# Ensure current directory is on pythonpath
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+from state_manager import (
+    StateManager,
+    STATE_RECEIVED,
+    STATE_RESERVED,
+    STATE_ACKNOWLEDGED,
+    STATE_DOWNLOADING,
+    STATE_PROCESSING,
+    STATE_SUBMITTING_TO_CUPS,
+    STATE_SUBMITTED_TO_CUPS,
+    STATE_PRINTING,
+    STATE_COMPLETED,
+    STATE_CLOUD_COMPLETED,
+    STATE_FAILED_BEFORE_SUBMISSION,
+    STATE_ACK_RETRY_PENDING,
+    STATE_CLOUD_COMPLETION_PENDING,
+    STATE_OUTCOME_UNCERTAIN,
+    STATE_RECOVERY_REQUIRED,
+    STATE_CUPS_SUBMISSION_UNCERTAIN,
+    NON_RETRYABLE_PRINT_STATES,
+)
+from cups_controller import (
+    CupsController,
+    CupsSubmissionError,
+    CupsQueueUnavailableError,
+)
+from document_manager import (
+    DocumentManager,
+    secure_wipe_file,
+    sanitize_job_id,
+)
 
 # LOGGING SETUP
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] SMARTPRINT-AGENT: %(message)s"
 )
+logger = logging.getLogger("smartprint.agent")
 
-# CONFIGURATION AND PATHS
 CONFIG_FILE = os.getenv("SMARTPRINT_CONFIG", "/etc/smartprint/agent_config.json")
-LOCAL_STATE_DIR = "/var/lib/smartprint"
-LOCAL_STATE_DB = os.path.join(LOCAL_STATE_DIR, "agent_state.db")
-TEMP_JOBS_DIR = os.path.join(LOCAL_STATE_DIR, "jobs")
-
 DEFAULT_BACKEND_URL = os.getenv("SMARTPRINT_BACKEND_URL", "https://smart-prints.vercel.app")
-DEFAULT_KIOSK_ID = os.getenv("SMARTPRINT_KIOSK_ID", "")
+DEFAULT_KIOSK_ID = os.getenv("SMARTPRINT_KIOSK_ID", "GITAM-SPK-001")
 DEFAULT_DEVICE_TOKEN = os.getenv("SMARTPRINT_DEVICE_TOKEN", "")
 
 
-def load_config():
-    """Loads agent configuration from file or environment."""
+def load_config() -> Dict[str, Any]:
+    """Loads agent configuration from /etc/smartprint/agent_config.json or environment."""
     cfg = {
         "backend_url": DEFAULT_BACKEND_URL,
         "kiosk_id": DEFAULT_KIOSK_ID,
@@ -50,98 +76,35 @@ def load_config():
         "organization_id": os.getenv("SMARTPRINT_ORG_ID", ""),
         "poll_interval_sec": 4,
         "heartbeat_interval_sec": 10,
+        "outbox_interval_sec": 5,
         "verify_ssl": True,
+        "cups_queue": os.getenv("SMARTPRINT_CUPS_QUEUE", "HP_Laser_108w"),
+        "max_pdf_size_mb": 50,
+        "job_timeout_seconds": 120,
     }
 
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 user_cfg = json.load(f)
                 cfg.update(user_cfg)
         except Exception as e:
-            logging.warning(f"Failed to read config file {CONFIG_FILE}: {e}")
+            logger.warning(f"Failed to read config file {CONFIG_FILE}: {e}")
 
     # Fallback to env vars if file did not set them
     if not cfg.get("kiosk_id"):
-        cfg["kiosk_id"] = os.getenv("SMARTPRINT_KIOSK_ID", "")
+        cfg["kiosk_id"] = os.getenv("SMARTPRINT_KIOSK_ID", DEFAULT_KIOSK_ID)
     if not cfg.get("device_token"):
         cfg["device_token"] = os.getenv("SMARTPRINT_DEVICE_TOKEN", "")
 
     return cfg
 
 
-def init_local_db():
-    """Initializes local SQLite database with restrictive permissions to prevent duplicate prints."""
-    try:
-        os.makedirs(LOCAL_STATE_DIR, mode=0o700, exist_ok=True)
-        os.chmod(LOCAL_STATE_DIR, 0o700)
-    except Exception as e:
-        logging.warning(f"Could not set permissions on {LOCAL_STATE_DIR}: {e}")
-
-    conn = sqlite3.connect(LOCAL_STATE_DB)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS processed_jobs (
-            job_id TEXT PRIMARY KEY,
-            idempotency_key TEXT UNIQUE,
-            status TEXT,
-            cups_job_id INTEGER,
-            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-    try:
-        if os.path.exists(LOCAL_STATE_DB):
-            os.chmod(LOCAL_STATE_DB, 0o600)
-    except Exception as e:
-        logging.warning(f"Could not set 0600 on {LOCAL_STATE_DB}: {e}")
-
-
-def is_job_already_processed(job_id, idempotency_key):
-    """Checks if job was already processed locally in SQLite database."""
-    conn = sqlite3.connect(LOCAL_STATE_DB)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT status FROM processed_jobs WHERE job_id = ? OR idempotency_key = ?",
-        (job_id, idempotency_key)
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return row is not None
-
-
-def get_job_local_status(job_id, idempotency_key):
-    """Retrieves the local recorded status for a job."""
-    conn = sqlite3.connect(LOCAL_STATE_DB)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT status FROM processed_jobs WHERE job_id = ? OR idempotency_key = ?",
-        (job_id, idempotency_key)
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-
-def mark_job_processed_locally(job_id, idempotency_key, status, cups_job_id=None):
-    """Records print job status in local state database."""
-    conn = sqlite3.connect(LOCAL_STATE_DB)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO processed_jobs (job_id, idempotency_key, status, cups_job_id) VALUES (?, ?, ?, ?)",
-        (job_id, idempotency_key, status, cups_job_id)
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_system_telemetry():
-    """Reads Raspberry Pi CPU temperature, RAM usage, and Disk usage. Returns None for unavailable metrics."""
-    cpu_temp = None
-    ram_usage = None
-    disk_usage = None
+def get_system_telemetry() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Reads Raspberry Pi CPU temperature, RAM usage, and Disk usage."""
+    cpu_temp: Optional[float] = None
+    ram_usage: Optional[float] = None
+    disk_usage: Optional[float] = None
 
     # CPU Temp
     try:
@@ -173,6 +136,7 @@ def get_system_telemetry():
 
     # Disk Usage
     try:
+        import shutil
         total, used, free = shutil.disk_usage("/")
         if total > 0:
             disk_usage = round((used / total) * 100.0, 1)
@@ -182,12 +146,8 @@ def get_system_telemetry():
     return cpu_temp, ram_usage, disk_usage
 
 
-def get_hardware_model():
-    """
-    Dynamically identifies the physical Raspberry Pi hardware model.
-    Reads official Linux device-tree and cpuinfo interfaces, avoiding hardcoded values.
-    """
-    # 1. Device Tree Model (authoritative on Raspberry Pi OS Linux)
+def get_hardware_model() -> Optional[str]:
+    """Dynamically identifies physical Raspberry Pi hardware model."""
     for dt_path in ("/proc/device-tree/model", "/sys/firmware/devicetree/base/model"):
         try:
             if os.path.exists(dt_path):
@@ -204,7 +164,7 @@ def get_hardware_model():
         except Exception:
             pass
 
-    # 2. Check /proc/cpuinfo (Model line fallback)
+    # /proc/cpuinfo fallback
     try:
         if os.path.exists("/proc/cpuinfo"):
             with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
@@ -217,7 +177,6 @@ def get_hardware_model():
     except Exception:
         pass
 
-    # 3. Environment or config override if explicitly configured
     env_model = os.getenv("SMARTPRINT_HARDWARE_MODEL")
     if env_model:
         return env_model.strip()
@@ -225,8 +184,8 @@ def get_hardware_model():
     return None
 
 
-def get_local_ip():
-    """Detects primary local network IP address of the device."""
+def get_local_ip() -> Optional[str]:
+    """Detects primary local network interface IP without transmitting network packets."""
     import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -249,90 +208,56 @@ def get_local_ip():
     return None
 
 
-def secure_wipe_file(file_path):
-    """
-    Overwrites document file with zeros before unlinking to guarantee complete data destruction.
-    Prevents physical forensics recovery of customer files on Raspberry Pi SD card.
-    """
-    if not os.path.exists(file_path):
-        return
-
-    try:
-        shred_path = shutil.which("shred")
-        if shred_path:
-            subprocess.run(
-                [shred_path, "-u", "-n", "1", file_path],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            logging.info(f"Securely shredded document: {file_path}")
-            return
-    except Exception as e:
-        logging.warning(f"shred tool unavailable or failed, using zero overwrite fallback: {e}")
-
-    try:
-        size = os.path.getsize(file_path)
-        with open(file_path, "wb") as f:
-            f.write(b"\x00" * size)
-        os.remove(file_path)
-        logging.info(f"Overwritten with 0x00 and removed: {file_path}")
-    except Exception as e:
-        logging.error(f"Error during file destruction: {e}")
+# Legacy compatibility aliases
+def init_local_db():
+    """Initializes local state database (legacy compatibility alias)."""
+    return StateManager()
 
 
 def cleanup_stale_temp_files():
-    """Boot-time & periodic cleanup of lingering job directories in /var/lib/smartprint/jobs."""
-    if not os.path.exists(TEMP_JOBS_DIR):
-        try:
-            os.makedirs(TEMP_JOBS_DIR, mode=0o700, exist_ok=True)
-            os.chmod(TEMP_JOBS_DIR, 0o700)
-        except Exception:
-            pass
-        return
-
-    logging.info(f"Scanning {TEMP_JOBS_DIR} for stale temporary files...")
-    for entry in os.listdir(TEMP_JOBS_DIR):
-        full_path = os.path.join(TEMP_JOBS_DIR, entry)
-        try:
-            if os.path.isdir(full_path):
-                for sub in os.listdir(full_path):
-                    doc_path = os.path.join(full_path, sub)
-                    secure_wipe_file(doc_path)
-                os.rmdir(full_path)
-            elif os.path.isfile(full_path):
-                secure_wipe_file(full_path)
-        except Exception as e:
-            logging.error(f"Cleanup error on {full_path}: {e}")
+    """Cleans up stale temporary files (legacy compatibility alias)."""
+    return DocumentManager().cleanup_stale_active_workspaces()
 
 
 class SmartPrintAgent:
-    def __init__(self):
-        self.config = load_config()
-        self.cups = CupsController()
-        init_local_db()
-        cleanup_stale_temp_files()
+    """Production Agent managing kiosk lifecycle on Raspberry Pi."""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or load_config()
+        state_dir = self.config.get("state_dir") or os.getenv("SMARTPRINT_STATE_DIR")
+        self.state_mgr = StateManager(state_dir=state_dir)
+        self.cups = CupsController(default_queue=self.config.get("cups_queue", "HP_Laser_108w"))
+        self.doc_mgr = DocumentManager(state_dir=state_dir)
         self.running = True
 
-        if not self.config.get("kiosk_id") or not self.config.get("device_token"):
-            logging.error("CRITICAL: Kiosk ID or Device Token is not configured. Run registration script first.")
+        # Register OS signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, self._handle_signal)
+        signal.signal(signal.SIGINT, self._handle_signal)
 
-    def get_ssl_context(self):
-        """Creates SSL context with strict certificate verification by default."""
+    def _handle_signal(self, signum, frame):
+        """Gracefully stops agent without interrupting active atomic steps."""
+        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        logger.info(f"Received {sig_name}. Initiating graceful agent shutdown...")
+        self.running = False
+
+    def get_ssl_context(self) -> ssl.SSLContext:
+        """Creates SSL context with strict certificate verification."""
         insecure = (
             os.getenv("SMARTPRINT_INSECURE_SSL", "").lower() in ("1", "true", "yes")
             or not self.config.get("verify_ssl", True)
         )
         if insecure:
-            logging.warning("INSECURE SSL CONTEXT IN USE: TLS certificate verification is disabled.")
+            logger.warning("INSECURE SSL CONTEXT IN USE: TLS certificate verification is disabled.")
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             return ctx
         return ssl.create_default_context()
 
-    def make_api_request(self, endpoint, payload=None, method="POST"):
-        """Sends authenticated request to Cloud Backend with rigorous status checking."""
+    def make_api_request(
+        self, endpoint: str, payload: Optional[Dict[str, Any]] = None, method: str = "POST"
+    ) -> Dict[str, Any]:
+        """Sends authenticated request to Cloud Backend."""
         base_url = self.config["backend_url"].rstrip("/")
         url = f"{base_url}{endpoint}"
 
@@ -340,7 +265,7 @@ class SmartPrintAgent:
             "Content-Type": "application/json",
             "X-Kiosk-Id": self.config.get("kiosk_id", ""),
             "X-Device-Token": self.config.get("device_token", ""),
-            "User-Agent": f"GITAM-SmartPrint-Agent/1.0 ({self.config.get('kiosk_id', 'unknown')})"
+            "User-Agent": f"GITAM-SmartPrint-Agent/3.0 ({self.config.get('kiosk_id', 'unknown')})"
         }
         if self.config.get("organization_id"):
             headers["X-Organization-Id"] = self.config["organization_id"]
@@ -350,13 +275,13 @@ class SmartPrintAgent:
         ctx = self.get_ssl_context()
 
         try:
-            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
                 resp_body = resp.read().decode("utf-8")
                 parsed = json.loads(resp_body) if resp_body else {}
                 return {
                     "success": True,
                     "status_code": resp.status,
-                    "data": parsed
+                    "data": parsed,
                 }
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8") if e.fp else str(e)
@@ -364,24 +289,27 @@ class SmartPrintAgent:
                 err_data = json.loads(err_msg)
             except Exception:
                 err_data = {"error": err_msg}
-            logging.error(f"HTTP Error {e.code} on {endpoint}: {err_data.get('error', err_msg)}")
+            logger.error(f"HTTP Error {e.code} on {endpoint}: {err_data.get('error', err_msg)}")
             return {
                 "success": False,
                 "status_code": e.code,
                 "error": err_data.get("error", err_msg),
-                "data": err_data
+                "data": err_data,
             }
         except Exception as e:
-            logging.error(f"Network request failed for {endpoint}: {e}")
+            logger.error(f"Network request failed for {endpoint}: {e}")
             return {
                 "success": False,
                 "status_code": 0,
                 "error": str(e),
-                "data": {}
+                "data": {},
             }
 
-    def send_heartbeat(self):
-        """Telemetry heartbeat sent to Cloud Backend."""
+    # --------------------------------------------------------------------------
+    # Telemetry Heartbeat
+    # --------------------------------------------------------------------------
+    def send_heartbeat(self) -> None:
+        """Sends periodic hardware and printer telemetry to Cloud Backend."""
         if not self.config.get("kiosk_id") or not self.config.get("device_token"):
             return
 
@@ -392,7 +320,7 @@ class SmartPrintAgent:
 
         telemetry = {
             "kiosk_id": self.config["kiosk_id"],
-            "agent_version": "1.0.0"
+            "agent_version": self.config.get("agent_version", "1.0.0"),
         }
         if cpu_temp is not None:
             telemetry["cpu_temp"] = cpu_temp
@@ -415,16 +343,123 @@ class SmartPrintAgent:
             temp_str = f"{cpu_temp}°C" if cpu_temp is not None else "N/A"
             ram_str = f"{ram_pct}%" if ram_pct is not None else "N/A"
             disk_str = f"{disk_pct}%" if disk_pct is not None else "N/A"
-            logging.info(
+            logger.info(
                 f"Heartbeat OK | Model: {hw_model or 'N/A'} | IP: {local_ip or 'N/A'} | "
                 f"Temp: {temp_str} | RAM: {ram_str} | Disk: {disk_str} | Printer: {printer_status}"
             )
             if data.get("maintenance_mode"):
-                logging.warning("Kiosk is currently in MAINTENANCE MODE.")
+                logger.warning("Kiosk is currently in MAINTENANCE MODE.")
         else:
-            logging.warning(f"Heartbeat warning (HTTP {res.get('status_code')}): {res.get('error')}")
+            logger.warning(f"Heartbeat warning (HTTP {res.get('status_code')}): {res.get('error')}")
 
-    def fetch_and_process_jobs(self):
+    # --------------------------------------------------------------------------
+    # Startup Crash Recovery Audit
+    # --------------------------------------------------------------------------
+    def startup_recovery_check(self) -> None:
+        """
+        Inspects local database on startup to recover safely from unexpected crashes or power loss.
+        Never automatically reprints jobs that may have already been printed.
+        """
+        logger.info("Executing startup crash recovery inspection...")
+
+        # 1. Check jobs that were in active CUPS submission or printing
+        active_submitted = self.state_mgr.get_submitted_active_jobs()
+        for job in active_submitted:
+            job_id = job["job_id"]
+            status = job["status"]
+            cups_job_id = job.get("cups_job_id")
+            cups_queue = job.get("cups_queue") or self.cups.default_queue
+
+            if status in (STATE_SUBMITTED_TO_CUPS, STATE_PRINTING):
+                logger.warning(
+                    f"CRASH RECOVERY: Found job {job_id} in '{status}' with CUPS ID {cups_job_id}."
+                )
+                if cups_job_id:
+                    # Check CUPS status
+                    success, msg = self.cups.wait_for_job_completion(
+                        cups_job_id, timeout_seconds=10, queue_name=cups_queue
+                    )
+                    if success:
+                        logger.info(f"CRASH RECOVERY: Job {job_id} confirmed completed in CUPS.")
+                        self.state_mgr.transition_status(job_id, STATE_COMPLETED, cups_job_id=cups_job_id)
+                        self.state_mgr.enqueue_outbox(
+                            job_id, "/api/kiosk/job-complete", {"job_id": job_id, "cups_job_id": cups_job_id}
+                        )
+                        self.doc_mgr.cleanup_job_workspace(job_id)
+                    else:
+                        logger.error(
+                            f"CRASH RECOVERY: Job {job_id} outcome uncertain ({msg}). "
+                            f"Preserving state. Automatic re-print PREVENTED."
+                        )
+                        self.state_mgr.transition_status(
+                            job_id, STATE_OUTCOME_UNCERTAIN, error_message=msg, recovery_reason="Interrupted during printing"
+                        )
+                        self.state_mgr.enqueue_outbox(
+                            job_id, "/api/kiosk/update-status",
+                            {"job_id": job_id, "status": "OUTCOME_UNCERTAIN", "error_message": msg}
+                        )
+                else:
+                    self.state_mgr.transition_status(
+                        job_id, STATE_CUPS_SUBMISSION_UNCERTAIN, recovery_reason="Missing CUPS ID on reboot"
+                    )
+
+            elif status in (STATE_COMPLETED, STATE_CLOUD_COMPLETION_PENDING):
+                # Ensure cloud completion is queued in outbox
+                logger.info(f"CRASH RECOVERY: Job {job_id} was completed locally. Ensuring outbox delivery...")
+                self.state_mgr.enqueue_outbox(
+                    job_id, "/api/kiosk/job-complete", {"job_id": job_id, "cups_job_id": cups_job_id}
+                )
+
+        # 2. Check jobs interrupted before CUPS submission
+        in_flight_pre_cups = self.state_mgr.get_in_flight_jobs()
+        for job in in_flight_pre_cups:
+            job_id = job["job_id"]
+            status = job["status"]
+            logger.warning(
+                f"CRASH RECOVERY: Found pre-submission job {job_id} in '{status}'. "
+                f"Since CUPS was never submitted, safely marking FAILED_BEFORE_SUBMISSION."
+            )
+            self.state_mgr.transition_status(
+                job_id, STATE_FAILED_BEFORE_SUBMISSION, error_message="Interrupted before CUPS submission"
+            )
+            self.doc_mgr.cleanup_job_workspace(job_id)
+            self.state_mgr.enqueue_outbox(
+                job_id, "/api/kiosk/update-status",
+                {"job_id": job_id, "status": "FAILED", "error_message": "Agent restarted before print submission"}
+            )
+
+        # 3. Clean up expired recovery retention files
+        purged = self.doc_mgr.cleanup_expired_recovery_files(max_age_hours=24)
+        if purged > 0:
+            logger.info(f"Cleaned up {purged} expired recovery files (> 24h old).")
+
+    # --------------------------------------------------------------------------
+    # Cloud Outbox Delivery Loop
+    # --------------------------------------------------------------------------
+    def process_outbox(self) -> None:
+        """Processes pending cloud outbox tasks with exponential backoff and idempotency."""
+        pending_items = self.state_mgr.get_pending_outbox_items(limit=5)
+        for item in pending_items:
+            outbox_id = item["id"]
+            job_id = item["job_id"]
+            endpoint = item["endpoint"]
+            payload = item["payload"]
+
+            res = self.make_api_request(endpoint, payload=payload, method="POST")
+            if res.get("success"):
+                logger.info(f"OUTBOX DELIVERED: id={outbox_id} endpoint={endpoint} job={job_id}")
+                self.state_mgr.mark_outbox_success(outbox_id)
+                if endpoint == "/api/kiosk/job-complete":
+                    self.state_mgr.transition_status(job_id, STATE_CLOUD_COMPLETED)
+            else:
+                err_msg = res.get("error", "Unknown error")
+                logger.warning(f"OUTBOX FAILED: id={outbox_id} endpoint={endpoint}: {err_msg}")
+                self.state_mgr.mark_outbox_failure(outbox_id, err_msg)
+
+    # --------------------------------------------------------------------------
+    # Job Polling & Execution Lifecycle
+    # --------------------------------------------------------------------------
+    def fetch_and_process_jobs(self) -> None:
         """Polls backend for active verified jobs assigned to this kiosk."""
         if not self.config.get("kiosk_id") or not self.config.get("device_token"):
             return
@@ -435,7 +470,7 @@ class SmartPrintAgent:
             method="POST"
         )
         if not res.get("success"):
-            logging.warning(f"Poll jobs request returned error: {res.get('error')}")
+            logger.warning(f"Poll jobs request returned error: {res.get('error')}")
             return
 
         data = res.get("data", {})
@@ -444,204 +479,330 @@ class SmartPrintAgent:
             return
 
         for job in jobs:
-            job_id = job["id"]
+            job_id = job.get("id")
             idempotency_key = job.get("idempotency_key")
-
-            # LOCAL DUPLICATE PRINT PROTECTION
-            # Never mark COMPLETED merely because a record exists in local DB.
-            if is_job_already_processed(job_id, idempotency_key):
-                local_status = get_job_local_status(job_id, idempotency_key)
-                logging.warning(
-                    f"Job {job_id} already exists in local DB with status '{local_status}'. "
-                    f"Skipping duplicate print processing without altering cloud state."
-                )
+            if not job_id:
                 continue
 
+            # 1. DUPLICATE PRINT PROTECTION: Check local database before touching anything
+            if self.state_mgr.is_job_known(job_id, idempotency_key):
+                known_job = self.state_mgr.get_job(job_id) or self.state_mgr.get_job_by_idempotency_key(idempotency_key)
+                local_status = known_job["status"] if known_job else "UNKNOWN"
+
+                if local_status in NON_RETRYABLE_PRINT_STATES:
+                    logger.warning(
+                        f"DUPLICATE GUARD: Job {job_id} already exists locally in state '{local_status}'. "
+                        f"Skipping duplicate execution to protect against double-printing."
+                    )
+                    continue
+
+            # 2. Execute full durable print lifecycle
             self.execute_print_job(job)
 
-    def execute_print_job(self, job):
-        """Full end-to-end print lifecycle on Raspberry Pi."""
+    def execute_print_job(self, job: Dict[str, Any]) -> None:
+        """
+        Durable Print Lifecycle:
+        RECEIVED -> RESERVED -> ACKNOWLEDGED -> DOWNLOADING -> PROCESSING ->
+        SUBMITTING_TO_CUPS -> SUBMITTED_TO_CUPS -> PRINTING -> COMPLETED -> CLOUD_COMPLETED
+        """
         job_id = job["id"]
         idempotency_key = job.get("idempotency_key")
+        kiosk_id = self.config["kiosk_id"]
+        target_queue = (
+            job.get("cups_printer_name")
+            or job.get("cups_queue_name")
+            or self.cups.default_queue
+        )
 
-        # Resolve download URL against backend_url
-        raw_download_url = job.get("signed_download_url") or f"/api/kiosk/download/{job_id}"
-        download_url = urllib.parse.urljoin(self.config["backend_url"], raw_download_url)
+        logger.info(f"========== STARTING DURABLE PRINT LIFECYCLE: JOB {job_id} ==========")
 
-        logging.info(f"========== START PRINT JOB {job_id} ==========")
-
-        # 1. Acknowledge job receipt to cloud server
-        ack_res = self.make_api_request("/api/kiosk/update-status", {
-            "job_id": job_id,
-            "status": "ACKNOWLEDGED",
-        })
-        if not ack_res.get("success"):
-            logging.error(f"Failed to ACKNOWLEDGE job {job_id}: {ack_res.get('error')}. Aborting job.")
+        # Step A: Atomic SQLite Reservation
+        reserved, existing_status = self.state_mgr.reserve_job(
+            job_id=job_id,
+            idempotency_key=idempotency_key,
+            kiosk_id=kiosk_id,
+            pages_total=job.get("pages_total", 1),
+            pages_selected=job.get("pages_selected", "All"),
+            copies=job.get("copies", 1),
+            is_color=bool(job.get("is_color", False)),
+            is_duplex=bool(job.get("is_duplex", False)),
+        )
+        if not reserved:
+            logger.warning(f"Aborting job {job_id}: reservation rejected (existing status: '{existing_status}')")
             return
 
-        # 2. Transition to DOWNLOADING
-        dl_status_res = self.make_api_request("/api/kiosk/update-status", {
+        # Step B: Cloud Acknowledgment with Retry
+        ack_success = False
+        for attempt in range(1, 4):
+            ack_res = self.make_api_request("/api/kiosk/update-status", {
+                "job_id": job_id,
+                "status": "ACKNOWLEDGED",
+            })
+            if ack_res.get("success"):
+                ack_success = True
+                break
+            logger.warning(f"Cloud ACK attempt {attempt}/3 failed: {ack_res.get('error')}. Retrying...")
+            time.sleep(2.0)
+
+        if not ack_success:
+            logger.error(f"Cloud ACK permanently failed for job {job_id}. Aborting without submitting to CUPS.")
+            self.state_mgr.transition_status(
+                job_id, STATE_FAILED_BEFORE_SUBMISSION, error_message="Cloud acknowledgment failed"
+            )
+            return
+
+        self.state_mgr.transition_status(job_id, STATE_ACKNOWLEDGED)
+
+        # Step C: Transition to DOWNLOADING
+        self.state_mgr.transition_status(job_id, STATE_DOWNLOADING)
+        self.make_api_request("/api/kiosk/update-status", {
             "job_id": job_id,
             "status": "DOWNLOADING"
         })
-        if not dl_status_res.get("success"):
-            logging.error(f"Failed to transition to DOWNLOADING: {dl_status_res.get('error')}")
 
-        # Create temporary job workspace directory (mode 0700)
-        job_dir = os.path.join(TEMP_JOBS_DIR, job_id)
-        os.makedirs(job_dir, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(job_dir, 0o700)
-        except Exception:
-            pass
-        local_file_path = os.path.join(job_dir, "document.pdf")
+        # Step D: Secure Temporary File Download
+        raw_download_url = job.get("signed_download_url") or f"/api/kiosk/download/{job_id}"
+        download_url = urllib.parse.urljoin(self.config["backend_url"], raw_download_url)
+        local_file_path = self.doc_mgr.prepare_job_workspace(job_id)
 
         try:
-            # 3. Securely Download temporary document using TLS and device headers
-            logging.info(f"Downloading temporary document for job {job_id} from {download_url}...")
+            logger.info(f"Downloading temporary document for job {job_id} from {download_url}...")
             ctx = self.get_ssl_context()
             dl_req = urllib.request.Request(
                 download_url,
                 headers={
                     "X-Kiosk-Id": self.config["kiosk_id"],
                     "X-Device-Token": self.config["device_token"],
-                    "User-Agent": f"GITAM-SmartPrint-Agent/1.0 ({self.config['kiosk_id']})",
+                    "User-Agent": f"GITAM-SmartPrint-Agent/3.0 ({self.config['kiosk_id']})",
                 }
             )
 
             with urllib.request.urlopen(dl_req, timeout=30, context=ctx) as resp, open(local_file_path, "wb") as f:
                 f.write(resp.read())
 
-            os.chmod(local_file_path, 0o600)
+            if hasattr(os, "chmod"):
+                os.chmod(local_file_path, 0o600)
 
-            # 4. Update status to PROCESSING
-            proc_res = self.make_api_request("/api/kiosk/update-status", {
-                "job_id": job_id,
-                "status": "PROCESSING"
-            })
-            if not proc_res.get("success"):
-                logging.warning(f"Processing transition warning: {proc_res.get('error')}")
-
-            # 5. Submit to CUPS queue
-            target_queue = (
-                job.get("cups_printer_name")
-                or job.get("cups_queue_name")
-                or self.cups.default_queue
-            )
-            options = {
-                "copies": job.get("copies", 1),
-                "pages_selected": job.get("pages_selected", "All"),
-                "is_color": job.get("is_color", False),
-                "is_duplex": job.get("is_duplex", False),
-                "orientation": job.get("orientation", "portrait")
-            }
-
-            self.make_api_request("/api/kiosk/update-status", {
-                "job_id": job_id,
-                "status": "SUBMITTED_TO_CUPS",
-            })
-
-            cups_job_id = self.cups.submit_print_job(local_file_path, options, queue_name=target_queue)
-            logging.info(f"Submitted to CUPS queue '{target_queue}' with job ID {cups_job_id}")
-
-            self.make_api_request("/api/kiosk/update-status", {
-                "job_id": job_id,
-                "status": "PRINTING",
-                "cups_job_id": cups_job_id
-            })
-
-            # 6. Wait for verified completion on target queue
-            success, status_msg = self.cups.wait_for_job_completion(
-                cups_job_id, timeout_seconds=120, queue_name=target_queue
-            )
-
-            if success:
-                logging.info(f"Print job {job_id} verified COMPLETED!")
-
-                # Mark local state DB before cloud completion call
-                mark_job_processed_locally(job_id, idempotency_key, "COMPLETED", cups_job_id)
-
-                # Send completion signal to backend (triggers cloud file deletion & DB completion)
-                comp_res = self.make_api_request("/api/kiosk/job-complete", {
-                    "job_id": job_id,
-                    "cups_job_id": cups_job_id,
-                })
-                if comp_res.get("success"):
-                    logging.info(f"Cloud job {job_id} completed and document destruction verified.")
-                else:
-                    logging.error(f"Job complete reporting error: {comp_res.get('error')}")
-
-                # 7. IMMEDIATELY DESTROY LOCAL FILE
-                secure_wipe_file(local_file_path)
-                try:
-                    os.rmdir(job_dir)
-                except Exception:
-                    pass
-                logging.info(f"CLEANUP VERIFIED: Local temporary file & directory destroyed for job {job_id}")
-
-            else:
-                logging.error(f"Print uncertain/failed for job {job_id}: {status_msg}")
-                outcome_status = "OUTCOME_UNCERTAIN" if "timed out" in status_msg.lower() else "RECOVERY_REQUIRED"
-
-                # Record outcome locally so it does NOT trigger automatic duplicate printing
-                mark_job_processed_locally(job_id, idempotency_key, outcome_status, cups_job_id)
-
-                self.make_api_request("/api/kiosk/update-status", {
-                    "job_id": job_id,
-                    "status": outcome_status,
-                    "error_message": status_msg,
-                    "cups_job_id": cups_job_id
-                })
+            # Validate downloaded document (magic bytes, size)
+            max_size_mb = self.config.get("max_pdf_size_mb", 50)
+            self.cups.validate_document(local_file_path, max_size_mb=max_size_mb)
 
         except Exception as e:
-            logging.error(f"Error executing print job {job_id}: {e}")
-            mark_job_processed_locally(job_id, idempotency_key, "RECOVERY_REQUIRED", None)
+            err_text = f"Download/validation error for job {job_id}: {e}"
+            logger.error(err_text)
+            self.state_mgr.transition_status(
+                job_id, STATE_FAILED_BEFORE_SUBMISSION, error_message=err_text
+            )
+            self.make_api_request("/api/kiosk/update-status", {
+                "job_id": job_id,
+                "status": "FAILED",
+                "error_message": str(e)
+            })
+            self.doc_mgr.cleanup_job_workspace(job_id)
+            return
+
+        # Step E: Transition to PROCESSING
+        self.state_mgr.transition_status(job_id, STATE_PROCESSING, document_path=local_file_path)
+        self.make_api_request("/api/kiosk/update-status", {
+            "job_id": job_id,
+            "status": "PROCESSING"
+        })
+
+        # Step F: Pre-check Queue Readiness
+        q_status, q_msg = self.cups.get_queue_status(target_queue)
+        if q_status in ("STOPPED", "OFFLINE", "ERROR", "PAPER_OUT", "TONER_EMPTY"):
+            err_text = f"Printer queue '{target_queue}' not ready ({q_status}): {q_msg}"
+            logger.error(err_text)
+            self.doc_mgr.preserve_for_recovery(
+                job_id, local_file_path, {"status": q_status, "error": q_msg, "queue": target_queue}
+            )
+            self.state_mgr.transition_status(
+                job_id, STATE_RECOVERY_REQUIRED, error_message=err_text, recovery_reason=q_status
+            )
             self.make_api_request("/api/kiosk/update-status", {
                 "job_id": job_id,
                 "status": "RECOVERY_REQUIRED",
-                "error_message": str(e)
+                "error_message": err_text
             })
+            return
+
+        # Step G: CUPS Submission (Exactly Once)
+        self.state_mgr.transition_status(job_id, STATE_SUBMITTING_TO_CUPS)
+
+        options = {
+            "copies": job.get("copies", 1),
+            "pages_selected": job.get("pages_selected", "All"),
+            "is_color": False,  # HP Laser 108w is strictly monochrome
+            "is_duplex": job.get("is_duplex", False),
+            "orientation": job.get("orientation", "portrait"),
+        }
+
+        cups_job_id: Optional[int] = None
+        try:
+            cups_job_id = self.cups.submit_print_job(local_file_path, options, queue_name=target_queue)
+            logger.info(f"CUPS accepted job {job_id} with verified CUPS Job ID: {cups_job_id}")
+        except Exception as e:
+            err_text = f"CUPS submission error for job {job_id}: {e}"
+            logger.error(err_text)
+            # Submission error is uncertain: do NOT reprint blindly!
+            self.doc_mgr.preserve_for_recovery(
+                job_id, local_file_path, {"error": str(e), "queue": target_queue}
+            )
+            self.state_mgr.transition_status(
+                job_id, STATE_CUPS_SUBMISSION_UNCERTAIN, error_message=err_text, recovery_reason="CUPS submission exception"
+            )
+            self.make_api_request("/api/kiosk/update-status", {
+                "job_id": job_id,
+                "status": "OUTCOME_UNCERTAIN",
+                "error_message": err_text
+            })
+            return
+
+        # Record verified submission in local state
+        self.state_mgr.transition_status(
+            job_id, STATE_SUBMITTED_TO_CUPS, cups_job_id=cups_job_id, cups_queue=target_queue
+        )
+        self.make_api_request("/api/kiosk/update-status", {
+            "job_id": job_id,
+            "status": "SUBMITTED_TO_CUPS",
+            "cups_job_id": cups_job_id
+        })
+
+        # Step H: Transition to PRINTING
+        self.state_mgr.transition_status(
+            job_id, STATE_PRINTING, cups_job_id=cups_job_id, cups_queue=target_queue
+        )
+        self.make_api_request("/api/kiosk/update-status", {
+            "job_id": job_id,
+            "status": "PRINTING",
+            "cups_job_id": cups_job_id
+        })
+
+        # Step I: Monitor Completion
+        timeout_sec = self.config.get("job_timeout_seconds", 120)
+        success, status_msg = self.cups.wait_for_job_completion(
+            cups_job_id, timeout_seconds=timeout_sec, queue_name=target_queue
+        )
+
+        if success:
+            logger.info(f"CUPS Job {cups_job_id} for job {job_id} verified COMPLETED!")
+            self.state_mgr.transition_status(
+                job_id, STATE_COMPLETED, cups_job_id=cups_job_id, cups_queue=target_queue
+            )
+
+            # Enqueue cloud completion report to outbox
+            self.state_mgr.enqueue_outbox(
+                job_id,
+                "/api/kiosk/job-complete",
+                {"job_id": job_id, "cups_job_id": cups_job_id}
+            )
+
+            # Attempt immediate outbox dispatch
+            self.process_outbox()
+
+            # Destroy local temporary document
+            self.doc_mgr.cleanup_job_workspace(job_id)
+            logger.info(f"CLEANUP VERIFIED: Local temporary files destroyed for completed job {job_id}")
+
+        else:
+            logger.error(f"Print failed or uncertain for job {job_id}: {status_msg}")
+            is_timeout = "timed out" in status_msg.lower()
+            outcome_status = STATE_OUTCOME_UNCERTAIN if is_timeout else STATE_RECOVERY_REQUIRED
+
+            # Move file to recovery folder - do NOT delete it!
+            self.doc_mgr.preserve_for_recovery(
+                job_id, local_file_path, {
+                    "cups_job_id": cups_job_id,
+                    "queue": target_queue,
+                    "error": status_msg,
+                }
+            )
+
+            self.state_mgr.transition_status(
+                job_id, outcome_status, cups_job_id=cups_job_id, error_message=status_msg
+            )
+
+            cloud_status = "OUTCOME_UNCERTAIN" if is_timeout else "RECOVERY_REQUIRED"
+            self.state_mgr.enqueue_outbox(
+                job_id,
+                "/api/kiosk/update-status",
+                {
+                    "job_id": job_id,
+                    "status": cloud_status,
+                    "error_message": status_msg,
+                    "cups_job_id": cups_job_id
+                }
+            )
+            self.process_outbox()
+
+    # --------------------------------------------------------------------------
+    # Main Agent Run Loop
+    # --------------------------------------------------------------------------
+    def run(self) -> None:
+        """Main service daemon loop."""
+        logger.info(f"Starting GITAM SMARTPRINT Agent v3.0 (Kiosk: {self.config.get('kiosk_id')})...")
+        logger.info(f"Backend Target: {self.config.get('backend_url')}")
+        logger.info(f"Default CUPS Queue: {self.config.get('cups_queue')}")
+
+        if not self.state_mgr.acquire_process_lock():
+            logger.critical("Another smartprint-agent instance is already running. Exiting.")
+            sys.exit(1)
+
+        try:
+            # Run startup crash recovery audit
+            self.startup_recovery_check()
+
+            last_heartbeat = 0.0
+            last_outbox_check = 0.0
+            last_cleanup_check = time.time()
+
+            hb_interval = self.config.get("heartbeat_interval_sec", 10)
+            poll_interval = self.config.get("poll_interval_sec", 4)
+            outbox_interval = self.config.get("outbox_interval_sec", 5)
+
+            while self.running:
+                now = time.time()
+
+                # 1. Telemetry Heartbeat
+                if now - last_heartbeat >= hb_interval:
+                    try:
+                        self.send_heartbeat()
+                    except Exception as e:
+                        logger.error(f"Heartbeat loop exception: {e}")
+                    last_heartbeat = now
+
+                # 2. Cloud Outbox Retries
+                if now - last_outbox_check >= outbox_interval:
+                    try:
+                        self.process_outbox()
+                    except Exception as e:
+                        logger.error(f"Outbox loop exception: {e}")
+                    last_outbox_check = now
+
+                # 3. FIFO Print Job Polling & Execution
+                try:
+                    self.fetch_and_process_jobs()
+                except Exception as e:
+                    logger.error(f"Job polling loop exception: {e}")
+
+                # 4. Hourly Bounded Retention Cleanup
+                if now - last_cleanup_check >= 3600:
+                    try:
+                        purged = self.doc_mgr.cleanup_expired_recovery_files(max_age_hours=24)
+                        cleaned = self.doc_mgr.cleanup_stale_active_workspaces(max_age_minutes=60)
+                        if purged > 0 or cleaned > 0:
+                            logger.info(f"Hourly maintenance: purged={purged} expired recovery files, cleaned={cleaned} stale workspaces.")
+                    except Exception as e:
+                        logger.error(f"Maintenance cleanup exception: {e}")
+                    last_cleanup_check = now
+
+                time.sleep(poll_interval)
 
         finally:
-            # Ensure local cleanup even if exception occurred
-            if os.path.exists(local_file_path):
-                secure_wipe_file(local_file_path)
-            if os.path.exists(job_dir):
-                try:
-                    shutil.rmtree(job_dir, ignore_errors=True)
-                except Exception:
-                    pass
-
-    def run(self):
-        """Main service loop."""
-        logging.info(f"Starting GITAM SMARTPRINT Agent for Kiosk {self.config.get('kiosk_id')}...")
-        logging.info(f"Backend Target: {self.config.get('backend_url')}")
-
-        last_heartbeat = 0
-        hb_interval = self.config.get("heartbeat_interval_sec", 10)
-        poll_interval = self.config.get("poll_interval_sec", 4)
-
-        while self.running:
-            now = time.time()
-            if now - last_heartbeat >= hb_interval:
-                try:
-                    self.send_heartbeat()
-                except Exception as e:
-                    logging.error(f"Heartbeat loop exception: {e}")
-                last_heartbeat = now
-
-            try:
-                self.fetch_and_process_jobs()
-            except Exception as e:
-                logging.error(f"Job polling exception: {e}")
-
-            time.sleep(poll_interval)
+            logger.info("SmartPrint Agent stopping. Releasing process lock.")
+            self.state_mgr.release_process_lock()
 
 
 if __name__ == "__main__":
     agent = SmartPrintAgent()
-    try:
-        agent.run()
-    except KeyboardInterrupt:
-        logging.info("Stopping SmartPrint Agent.")
-        sys.exit(0)
+    agent.run()

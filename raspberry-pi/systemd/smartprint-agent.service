@@ -1,25 +1,41 @@
 [Unit]
-Description=GITAM SMARTPRINT Raspberry Pi Agent Service
-After=network-online.target cups.service
+Description=GITAM SMARTPRINT Raspberry Pi Production Agent Service
+After=network-online.target cups.service ipp-usb.service
 Wants=network-online.target cups.service
+Documentation=https://github.com/Nikhil0-1/SmartPrint
 
 [Service]
 Type=simple
-User=root
+User=smartprint
+Group=smartprint
+SupplementaryGroups=lp lpadmin
 WorkingDirectory=/var/lib/smartprint
-ExecStartPre=/bin/bash /opt/smartprint/raspberry-pi/scripts/cleanup.sh
-ExecStart=/usr/bin/python3 /opt/smartprint/raspberry-pi/agent/smartprint_agent.py
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
+
+# Environment configuration
 Environment=PYTHONUNBUFFERED=1
 Environment=SMARTPRINT_CONFIG=/etc/smartprint/agent_config.json
+Environment=SMARTPRINT_STATE_DIR=/var/lib/smartprint
+Environment=SMARTPRINT_CUPS_QUEUE=HP_Laser_108w
 
-# Hardened security sandbox
+# Production Python 3 from system with PyCUPS installed
+ExecStart=/usr/bin/python3 /opt/smartprint/raspberry-pi/agent/smartprint_agent.py
+
+# Restart & Lifecycle management
+Restart=always
+RestartSec=5
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Logging to systemd journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=smartprint-agent
+
+# Permissions & Security
 ProtectSystem=full
-ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/var/lib/smartprint /var/log/smartprint
 
 [Install]
 WantedBy=multi-user.target

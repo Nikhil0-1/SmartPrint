@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# GITAM SMARTPRINT - SYSTEM HEALTH CHECK DIAGNOSTIC TOOL
-# Tests Internet, Backend, Database, USB Printer, CUPS, and Temp File Security
+# GITAM SMARTPRINT - SYSTEM HEALTH CHECK DIAGNOSTIC TOOL (v3.0)
+# Non-destructive diagnostics for Internet, Cloud Backend, CUPS, HP Laser 108w,
+# IPP-USB, SQLite Database, Storage, and Recovery Jobs.
 # ==============================================================================
 
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_DIR="${SCRIPT_DIR}/../agent"
+
+# Run Python-based diagnostic tool if Python 3 is installed
+if command -v python3 &>/dev/null && [ -f "${AGENT_DIR}/diagnostics.py" ]; then
+  exec python3 "${AGENT_DIR}/diagnostics.py" "$@"
+fi
+
+# Fallback bash checks if Python runtime is unavailable
 CONFIG_FILE="/etc/smartprint/agent_config.json"
-BACKEND_URL="http://localhost:3000"
+BACKEND_URL="https://smart-prints.vercel.app"
 KIOSK_ID="GITAM-SPK-001"
-QUEUE_NAME="HP_LaserJet_USB"
+QUEUE_NAME="HP_Laser_108w"
 
 if [ -f "$CONFIG_FILE" ]; then
-  BACKEND_URL=$(grep -o '"backend_url": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || echo "http://localhost:3000")
-  KIOSK_ID=$(grep -o '"kiosk_id": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || echo "GITAM-SPK-001")
+  BACKEND_URL=$(grep -o '"backend_url": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || echo "$BACKEND_URL")
+  KIOSK_ID=$(grep -o '"kiosk_id": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || echo "$KIOSK_ID")
 fi
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 pass_count=0
 fail_count=0
@@ -41,8 +53,8 @@ print_result() {
 }
 
 echo "=================================================="
-echo "    GITAM SMARTPRINT - HARDWARE & SYSTEM HEALTH  "
-echo "    Kiosk ID: $KIOSK_ID                          "
+echo "    GITAM SMARTPRINT - SYSTEM HEALTH DIAGNOSTICS "
+echo "    Kiosk ID: $KIOSK_ID | Queue: $QUEUE_NAME     "
 echo "=================================================="
 
 # 1. Internet Check
@@ -52,7 +64,7 @@ else
   print_result "Internet Connectivity" "FAIL" "Cannot ping public gateway"
 fi
 
-# 2. Cloud Backend API Check
+# 2. Cloud Backend API
 HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BACKEND_URL/api/health" 2>/dev/null || echo "000")
 if [ "$HTTP_STATUS" == "200" ]; then
   print_result "Cloud Backend API" "PASS" "Connected to $BACKEND_URL (HTTP 200)"
@@ -62,22 +74,29 @@ else
   print_result "Cloud Backend API" "WARN" "Received HTTP $HTTP_STATUS from $BACKEND_URL"
 fi
 
-# 3. USB HP Printer Hardware Check
-if lsusb | grep -qi "Hewlett-Packard\|HP"; then
-  USB_DEV=$(lsusb | grep -i "Hewlett-Packard\|HP" | head -n 1)
+# 3. USB HP Printer Hardware
+if lsusb | grep -qi "Hewlett-Packard\|HP\|03f0:\|04e8:"; then
+  USB_DEV=$(lsusb | grep -i "Hewlett-Packard\|HP\|03f0:\|04e8:" | head -n 1)
   print_result "USB HP Printer Detection" "PASS" "$USB_DEV"
 else
   print_result "USB HP Printer Detection" "FAIL" "No HP device detected on USB bus"
 fi
 
-# 4. CUPS Daemon
+# 4. IPP-USB Service
+if systemctl is-active --quiet ipp-usb; then
+  print_result "IPP-USB Daemon" "PASS" "ipp-usb.service active"
+else
+  print_result "IPP-USB Daemon" "WARN" "ipp-usb.service is not active"
+fi
+
+# 5. CUPS Daemon
 if systemctl is-active --quiet cups; then
   print_result "CUPS Printing Daemon" "PASS" "cups.service active and running"
 else
   print_result "CUPS Printing Daemon" "FAIL" "cups.service is stopped or failed"
 fi
 
-# 5. CUPS Queue Status
+# 6. CUPS Queue Status
 if command -v lpstat >/dev/null 2>&1; then
   if lpstat -p "$QUEUE_NAME" >/dev/null 2>&1; then
     Q_STATUS=$(lpstat -p "$QUEUE_NAME" | head -n 1)
@@ -89,33 +108,14 @@ else
   print_result "CUPS Utilities (lpstat)" "FAIL" "lpstat command not found"
 fi
 
-# 6. Disk Storage Space
-DISK_AVAIL_MB=$(df -m /var/lib | awk 'NR==2 {print $4}')
+# 7. Disk Storage Space
+DISK_AVAIL_MB=$(df -m /var/lib 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
 if [ "$DISK_AVAIL_MB" -gt 1000 ]; then
   print_result "Disk Storage (/var/lib)" "PASS" "${DISK_AVAIL_MB} MB available"
 elif [ "$DISK_AVAIL_MB" -gt 200 ]; then
   print_result "Disk Storage (/var/lib)" "WARN" "Low storage: only ${DISK_AVAIL_MB} MB available"
 else
   print_result "Disk Storage (/var/lib)" "FAIL" "CRITICAL: storage depleted (${DISK_AVAIL_MB} MB)"
-fi
-
-# 7. Temp Directory Security Permissions
-if [ -d "/var/lib/smartprint/jobs" ]; then
-  PERMS=$(stat -c "%a" /var/lib/smartprint/jobs 2>/dev/null || echo "000")
-  if [ "$PERMS" == "700" ]; then
-    print_result "Document Security Permissions" "PASS" "/var/lib/smartprint/jobs is chmod 700"
-  else
-    print_result "Document Security Permissions" "WARN" "Permissions are $PERMS (Expected: 700)"
-  fi
-else
-  print_result "Document Security Directory" "WARN" "/var/lib/smartprint/jobs does not exist yet"
-fi
-
-# 8. Time Synchronization
-if timedatectl 2>/dev/null | grep -qi "synchronized: yes"; then
-  print_result "NTP Time Sync" "PASS" "System clock synchronized"
-else
-  print_result "NTP Time Sync" "WARN" "NTP time synchronization not confirmed"
 fi
 
 echo "=================================================="
