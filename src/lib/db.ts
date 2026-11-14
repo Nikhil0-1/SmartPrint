@@ -129,10 +129,24 @@ export interface DbPrinter {
   supports_color: boolean;
   supports_duplex: boolean;
   capabilities: Record<string, unknown> | null;
+  device_uri?: string | null;
+  hardware_id?: string | null;
+  last_detected_at?: string | null;
+  last_successful_print?: string | null;
   last_test_print: string | null;
   last_error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DbPrinterErrorLog {
+  id: string;
+  printer_id: string;
+  kiosk_id: string;
+  cups_queue_name: string | null;
+  error_state: string;
+  error_message: string | null;
+  occurred_at: string;
 }
 
 export interface DbPrinterRouting {
@@ -768,6 +782,219 @@ export async function dbUpdatePrinter(id: string, updates: Partial<DbPrinter>): 
     return null;
   }
   return data;
+}
+
+export async function dbDeletePrinter(id: string): Promise<boolean> {
+  if (!isConfigured()) return false;
+  try {
+    await supabaseAdmin
+      .from('printer_routing')
+      .update({ bw_primary_printer_id: null })
+      .eq('bw_primary_printer_id', id);
+    await supabaseAdmin
+      .from('printer_routing')
+      .update({ bw_backup_printer_id: null })
+      .eq('bw_backup_printer_id', id);
+    await supabaseAdmin
+      .from('printer_routing')
+      .update({ color_primary_printer_id: null })
+      .eq('color_primary_printer_id', id);
+    await supabaseAdmin
+      .from('printer_routing')
+      .update({ color_backup_printer_id: null })
+      .eq('color_backup_printer_id', id);
+
+    const { error } = await supabaseAdmin.from('printers').delete().eq('id', id);
+    if (error) {
+      console.error('[DB] deletePrinter error:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[DB] deletePrinter exception:', err);
+    return false;
+  }
+}
+
+export async function dbRecordPrinterError(
+  printerId: string,
+  kioskId: string,
+  cupsQueueName: string | null,
+  errorState: string,
+  errorMessage: string | null
+): Promise<void> {
+  if (!isConfigured()) return;
+  try {
+    await supabaseAdmin.from('printer_error_logs').insert({
+      printer_id: printerId,
+      kiosk_id: kioskId,
+      cups_queue_name: cupsQueueName,
+      error_state: errorState,
+      error_message: errorMessage,
+      occurred_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.warn('[DB] recordPrinterError failed:', err);
+  }
+}
+
+export async function dbGetPrinterErrorLogs(printerId: string, limit = 20): Promise<DbPrinterErrorLog[]> {
+  if (!isConfigured()) return [];
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('printer_error_logs')
+      .select('*')
+      .eq('printer_id', printerId)
+      .order('occurred_at', { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.warn('[DB] getPrinterErrorLogs error:', error.message);
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    console.warn('[DB] getPrinterErrorLogs exception:', err);
+    return [];
+  }
+}
+
+export async function dbGetPrinterPrintHistory(printerId: string, limit = 20): Promise<any[]> {
+  if (!isConfigured()) return [];
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('print_jobs')
+      .select('id, pages_total, copies, is_color, is_duplex, status, created_at, updated_at')
+      .eq('printer_id', printerId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.warn('[DB] getPrinterPrintHistory error:', error.message);
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    console.warn('[DB] getPrinterPrintHistory exception:', err);
+    return [];
+  }
+}
+
+export async function dbUpsertDiscoveredPrinters(
+  kioskId: string,
+  discoveredList: Array<Record<string, any>>
+): Promise<{ updatedCount: number; addedCount: number; printers: DbPrinter[] }> {
+  if (!isConfigured() || !Array.isArray(discoveredList) || discoveredList.length === 0) {
+    return { updatedCount: 0, addedCount: 0, printers: [] };
+  }
+
+  try {
+    const existingPrinters = await dbGetPrinters(undefined, kioskId);
+    let updatedCount = 0;
+    let addedCount = 0;
+
+    for (const item of discoveredList) {
+      const queueName = item.cups_queue_name || item.queue_name;
+      const deviceUri = item.device_uri || item.uri;
+      const hardwareId = item.hardware_id;
+
+      // Match existing printer by hardware identity, queue name, or URI
+      const match = existingPrinters.find(
+        (p) =>
+          (hardwareId && p.hardware_id === hardwareId) ||
+          (queueName && p.cups_queue_name.toLowerCase() === queueName.toLowerCase()) ||
+          (deviceUri && p.device_uri && p.device_uri.toLowerCase() === deviceUri.toLowerCase())
+      );
+
+      const status = item.status || 'READY';
+      const lastError = item.last_error || item.error_message || null;
+      const now = new Date().toISOString();
+
+      if (match) {
+        // Update existing record
+        const updates: Partial<DbPrinter> = {
+          status,
+          last_detected_at: now,
+          updated_at: now,
+        };
+        if (lastError !== undefined) updates.last_error = lastError;
+        if (item.supports_color !== undefined) updates.supports_color = Boolean(item.supports_color);
+        if (item.supports_duplex !== undefined) updates.supports_duplex = Boolean(item.supports_duplex);
+        if (item.model) updates.model = item.model;
+        if (item.manufacturer) updates.manufacturer = item.manufacturer;
+        if (deviceUri) updates.device_uri = deviceUri;
+        if (hardwareId && !match.hardware_id) updates.hardware_id = hardwareId;
+        if (item.capabilities) updates.capabilities = item.capabilities;
+
+        await dbUpdatePrinter(match.id, updates);
+        updatedCount++;
+
+        // Record error if in error state
+        if (['ERROR', 'PAPER_OUT', 'TONER_EMPTY', 'STOPPED', 'OFFLINE'].includes(status)) {
+          await dbRecordPrinterError(match.id, kioskId, match.cups_queue_name, status, lastError);
+        }
+
+        // Record telemetry snapshot
+        await supabaseAdmin.from('printer_telemetry').insert({
+          printer_id: match.id,
+          kiosk_id: kioskId,
+          status,
+          cups_state: item.cups_state || status,
+          cups_reasons: item.cups_reasons || [],
+          recorded_at: now,
+        });
+      } else {
+        // Enforce maximum capacity (up to 10 to comfortably allow 5+ printers)
+        if (existingPrinters.length + addedCount < 10) {
+          const printerName = item.printer_name || item.display_name || item.model || queueName || 'Discovered Printer';
+          const manufacturer = item.manufacturer || 'Generic';
+          const model = item.model || printerName;
+          const isDefault = existingPrinters.length === 0;
+
+          const created = await dbCreatePrinter({
+            organization_id: item.organization_id || null,
+            kiosk_id: kioskId,
+            printer_name: printerName,
+            display_name: item.display_name || printerName,
+            manufacturer,
+            model,
+            cups_queue_name: queueName || `printer_${Date.now()}`,
+            connection_type: item.connection_type || 'USB',
+            status,
+            printer_type: item.supports_color ? 'COLOR' : 'BW',
+            enabled: true,
+            priority: existingPrinters.length + addedCount + 1,
+            is_default: isDefault,
+            supports_color: Boolean(item.supports_color),
+            supports_duplex: Boolean(item.supports_duplex),
+            capabilities: item.capabilities || {
+              color: Boolean(item.supports_color),
+              grayscale: true,
+              duplex: Boolean(item.supports_duplex),
+              paper_sizes: item.paper_sizes || ['A4'],
+            },
+            device_uri: deviceUri || null,
+            hardware_id: hardwareId || null,
+            last_detected_at: now,
+            last_successful_print: null,
+            last_test_print: null,
+            last_error: lastError,
+          });
+
+          if (created) {
+            addedCount++;
+            if (['ERROR', 'PAPER_OUT', 'TONER_EMPTY', 'STOPPED', 'OFFLINE'].includes(status)) {
+              await dbRecordPrinterError(created.id, kioskId, created.cups_queue_name, status, lastError);
+            }
+          }
+        }
+      }
+    }
+
+    const refreshed = await dbGetPrinters(undefined, kioskId);
+    return { updatedCount, addedCount, printers: refreshed };
+  } catch (err) {
+    console.error('[DB] dbUpsertDiscoveredPrinters error:', err);
+    return { updatedCount: 0, addedCount: 0, printers: [] };
+  }
 }
 
 // ─── Printer Routing ─────────────────────────────────────────────────────────
@@ -1440,22 +1667,77 @@ export async function dbSelectBestPrinterForJob(
     return { printer: null, error: 'No ready printers available for this kiosk.' };
   }
 
-  // Filter by color requirement
-  let candidates = printers;
+  // 1. Check Server-Side Routing Table for this kiosk
+  const routing = await dbGetRouting(kioskId);
+  let chosen: DbPrinter | undefined;
+
   if (isColor) {
-    candidates = candidates.filter((p) => p.supports_color);
-    if (candidates.length === 0) {
-      return { printer: null, error: 'No color-capable printers available at this kiosk.' };
+    // A. Check Primary Color Printer
+    if (routing?.color_primary_printer_id) {
+      const primary = printers.find((p) => p.id === routing.color_primary_printer_id);
+      if (primary && primary.status === 'READY' && (!isDuplex || primary.supports_duplex)) {
+        chosen = primary;
+      }
+    }
+
+    // B. Check Backup Color Printer (Failover)
+    if (!chosen && routing?.auto_backup_enabled && routing.color_backup_printer_id) {
+      const backup = printers.find((p) => p.id === routing.color_backup_printer_id);
+      if (backup && backup.supports_color && backup.status === 'READY' && (!isDuplex || backup.supports_duplex)) {
+        chosen = backup;
+      }
+    }
+
+    // C. Any ready Color printer on this kiosk
+    if (!chosen) {
+      chosen = printers.find((p) => p.supports_color && p.status === 'READY' && (!isDuplex || p.supports_duplex));
+    }
+
+    if (!chosen) {
+      return {
+        printer: null,
+        error: isDuplex
+          ? 'No color printer with two-sided (duplex) capability is currently ready.'
+          : 'All color printers are currently offline, busy, or experiencing an error.',
+      };
+    }
+  } else {
+    // Monochrome print job
+    // A. Check Primary B&W Printer
+    if (routing?.bw_primary_printer_id) {
+      const primary = printers.find((p) => p.id === routing.bw_primary_printer_id);
+      if (primary && primary.status === 'READY' && (!isDuplex || primary.supports_duplex)) {
+        chosen = primary;
+      }
+    }
+
+    // B. Check Backup B&W Printer (Failover)
+    if (!chosen && routing?.auto_backup_enabled && routing.bw_backup_printer_id) {
+      const backup = printers.find((p) => p.id === routing.bw_backup_printer_id);
+      if (backup && backup.status === 'READY' && (!isDuplex || backup.supports_duplex)) {
+        chosen = backup;
+      }
+    }
+
+    // C. Any ready B&W printer
+    if (!chosen) {
+      chosen = printers.find((p) => !p.supports_color && p.status === 'READY' && (!isDuplex || p.supports_duplex));
+    }
+
+    // D. Safe Color fallback for B&W job (Color printer can safely print monochrome)
+    if (!chosen) {
+      chosen = printers.find((p) => p.status === 'READY' && (!isDuplex || p.supports_duplex));
+    }
+
+    if (!chosen) {
+      return {
+        printer: null,
+        error: isDuplex
+          ? 'No printer with two-sided (duplex) capability is currently ready.'
+          : 'All B&W printers are currently offline or out of paper/toner.',
+      };
     }
   }
 
-  // Filter by duplex requirement if specified
-  if (isDuplex) {
-    const duplexCandidates = candidates.filter((p) => p.supports_duplex);
-    if (duplexCandidates.length > 0) candidates = duplexCandidates;
-  }
-
-  // Pick first available matching candidate
-  const selected = candidates.find((p) => p.status === 'READY') || candidates[0];
-  return { printer: selected as DbPrinter };
+  return { printer: chosen as DbPrinter };
 }

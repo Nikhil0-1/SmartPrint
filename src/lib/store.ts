@@ -596,6 +596,93 @@ class StateManager {
     return updated;
   }
 
+  deletePrinter(id: string, adminEmail = 'admin@gitam.edu'): boolean {
+    const printer = this.printers.get(id);
+    if (!printer) return false;
+    this.printers.delete(id);
+    // Unlink from routings
+    for (const [kioskId, r] of this.routings.entries()) {
+      let changed = false;
+      if (r.bw_primary_printer_id === id) { r.bw_primary_printer_id = null; changed = true; }
+      if (r.bw_backup_printer_id === id) { r.bw_backup_printer_id = null; changed = true; }
+      if (r.color_primary_printer_id === id) { r.color_primary_printer_id = null; changed = true; }
+      if (r.color_backup_printer_id === id) { r.color_backup_printer_id = null; changed = true; }
+      if (changed) this.routings.set(kioskId, r);
+    }
+    this.logAudit(adminEmail, 'DELETE_PRINTER', 'printers', id, { name: printer.display_name });
+    return true;
+  }
+
+  upsertDiscoveredPrinters(kioskId: string, discovered: Array<Record<string, any>>): Printer[] {
+    const existing = this.getPrinters(undefined, kioskId);
+    const now = new Date().toISOString();
+
+    for (const d of discovered) {
+      const queue = d.cups_queue_name || d.queue_name;
+      const deviceUri = d.device_uri || d.uri;
+      const hwId = d.hardware_id;
+
+      const match = existing.find(
+        (p) =>
+          (hwId && p.hardware_id === hwId) ||
+          (queue && p.cups_queue_name.toLowerCase() === queue.toLowerCase()) ||
+          (deviceUri && p.device_uri && p.device_uri.toLowerCase() === deviceUri.toLowerCase())
+      );
+
+      const status = (d.status || 'READY') as any;
+      const lastError = d.last_error || d.error_message || undefined;
+
+      if (match) {
+        this.updatePrinter(match.id, {
+          status,
+          last_detected_at: now,
+          last_error: lastError,
+          supports_color: d.supports_color !== undefined ? Boolean(d.supports_color) : match.supports_color,
+          supports_duplex: d.supports_duplex !== undefined ? Boolean(d.supports_duplex) : match.supports_duplex,
+          device_uri: deviceUri || match.device_uri,
+          model: d.model || match.model,
+          manufacturer: d.manufacturer || match.manufacturer,
+          capabilities: d.capabilities || match.capabilities,
+        });
+      } else if (existing.length < 10) {
+        const id = `printer_${kioskId}_${queue || Date.now()}`;
+        const newPrinter: Printer = {
+          id,
+          kiosk_id: kioskId,
+          printer_name: d.printer_name || d.model || queue || 'Discovered Printer',
+          display_name: d.display_name || d.model || queue || 'Discovered Printer',
+          manufacturer: d.manufacturer || 'Generic',
+          model: d.model || 'Generic Printer',
+          cups_queue_name: queue || `printer_${Date.now()}`,
+          connection_type: d.connection_type || 'USB',
+          status,
+          printer_type: d.supports_color ? 'COLOR' : 'BW',
+          enabled: true,
+          priority: existing.length + 1,
+          is_default: existing.length === 0,
+          supports_color: Boolean(d.supports_color),
+          supports_duplex: Boolean(d.supports_duplex),
+          capabilities: d.capabilities || {
+            color: Boolean(d.supports_color),
+            grayscale: true,
+            duplex: Boolean(d.supports_duplex),
+            paper_sizes: d.paper_sizes || ['A4'],
+          },
+          device_uri: deviceUri,
+          hardware_id: hwId,
+          last_detected_at: now,
+          last_error: lastError,
+          created_at: now,
+          updated_at: now,
+        };
+        this.printers.set(id, newPrinter);
+        existing.push(newPrinter);
+      }
+    }
+
+    return this.getPrinters(undefined, kioskId);
+  }
+
   getRouting(kioskId: string): PrinterRouting | undefined {
     return this.routings.get(kioskId);
   }

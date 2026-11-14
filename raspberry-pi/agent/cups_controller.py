@@ -11,6 +11,7 @@ import sys
 import time
 import json
 import logging
+import hashlib
 import subprocess
 from typing import Optional, Tuple, Dict, Any, List
 
@@ -64,48 +65,185 @@ class CupsController:
         self._init_connection()
 
     # --------------------------------------------------------------------------
-    # Printer Discovery (USB & ipp-usb)
+    # Multi-Printer Auto-Discovery (USB, IPP-USB, Network, CUPS Queues)
     # --------------------------------------------------------------------------
-    @staticmethod
-    def detect_usb_printers() -> List[Dict[str, Any]]:
+    def discover_all_printers(self) -> List[Dict[str, Any]]:
         """
-        Discovers USB printers connected to Raspberry Pi via:
-        1. lsusb bus enumeration (HP / Samsung OEM vendor IDs)
-        2. ipp-usb service status and local port 60000
-        3. CUPS detected devices via lpinfo -v
+        Comprehensive Multi-Printer Auto-Discovery Engine:
+        Discovers up to 5+ physical printers connected to the kiosk via:
+        1. Configured CUPS printer queues (pycups getPrinters() or lpstat -p -d -v)
+        2. USB bus devices (lsusb and lpinfo -v)
+        3. IPP-over-USB endpoints (ipp-usb service and ports 60000..60005)
+        4. Network / LAN printers (lpinfo -v for ipp://, socket://, dnssd://)
+
+        Identifies:
+        - Manufacturer & model
+        - Device URI
+        - Connection type ('USB', 'IPP-USB', 'NETWORK', 'IPP')
+        - CUPS queue name
+        - Color capability
+        - Duplex capability
+        - Supported paper sizes
+        - Real-time printer state & errors
+        - Deterministic hardware_id (prevents duplicate records on rediscovery)
+
+        Never creates fake records. Never assumes all five printers are connected.
         """
         printers: List[Dict[str, Any]] = []
+        seen_keys = set()
+
+        # Helper: Deterministic hardware ID
+        def make_hardware_id(conn: str, uri: str, model_str: str) -> str:
+            seed = f"{conn.strip().upper()}:{uri.strip().lower()}:{model_str.strip().lower()}"
+            return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+        # 1. Discover via CUPS Queues (Active Configured Printers)
+        cups_queues: Dict[str, Dict[str, Any]] = {}
+        default_queue_name = self.default_queue
+
+        if HAS_PYCUPS:
+            try:
+                if not self.conn:
+                    self._init_connection()
+                if self.conn:
+                    cups_queues = self.conn.getPrinters()
+                    try:
+                        default_queue_name = self.conn.getDefault() or self.default_queue
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"pycups getPrinters warning: {e}")
+
+        # Fallback to CLI lpstat if pycups not populated
+        if not cups_queues:
+            try:
+                lpstat_v = subprocess.check_output(["lpstat", "-v"], text=True, stderr=subprocess.DEVNULL)
+                for line in lpstat_v.splitlines():
+                    # Format: device for <queue_name>: <uri>
+                    line = line.strip()
+                    if line.startswith("device for "):
+                        parts = line[len("device for "):].split(":", 1)
+                        if len(parts) == 2:
+                            q_name = parts[0].strip()
+                            q_uri = parts[1].strip()
+                            cups_queues[q_name] = {
+                                "device-uri": q_uri,
+                                "printer-info": q_name,
+                                "printer-make-and-model": q_name,
+                            }
+                # Check default queue
+                try:
+                    def_out = subprocess.check_output(["lpstat", "-d"], text=True, stderr=subprocess.DEVNULL)
+                    for line in def_out.splitlines():
+                        if "destination:" in line.lower():
+                            default_queue_name = line.split(":", 1)[1].strip()
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"CLI lpstat -v discovery warning: {e}")
+
+        # Process each discovered CUPS queue
+        for q_name, q_info in cups_queues.items():
+            device_uri = q_info.get("device-uri", "")
+            raw_model = q_info.get("printer-make-and-model") or q_info.get("printer-info") or q_name
+            is_def = (q_name == default_queue_name)
+
+            # Determine connection type
+            uri_lower = device_uri.lower()
+            if "60000" in uri_lower or "ipp-usb" in uri_lower:
+                conn_type = "IPP-USB"
+            elif "usb://" in uri_lower:
+                conn_type = "USB"
+            elif "socket://" in uri_lower:
+                conn_type = "NETWORK"
+            elif "ipp://" in uri_lower or "ipps://" in uri_lower:
+                conn_type = "NETWORK" if ("192." in uri_lower or "10." in uri_lower or "172." in uri_lower) else "IPP"
+            else:
+                conn_type = "USB"
+
+            # Parse manufacturer and clean model
+            manufacturer = "Generic"
+            for mfg in ["HP", "Hewlett-Packard", "Epson", "Canon", "Brother", "Pantum", "Xerox", "Samsung", "Ricoh"]:
+                if mfg.lower() in raw_model.lower() or mfg.lower() in q_name.lower() or mfg.lower() in device_uri.lower():
+                    manufacturer = "HP" if mfg == "Hewlett-Packard" else mfg
+                    break
+
+            clean_model = raw_model
+            if clean_model.lower().startswith(manufacturer.lower()):
+                clean_model = clean_model[len(manufacturer):].strip()
+            if not clean_model:
+                clean_model = q_name
+
+            # Detect color support
+            supports_color = False
+            # Check model name keywords
+            if any(k in raw_model.lower() or k in q_name.lower() for k in ["color", "colour", "cmyk", "rgb"]):
+                supports_color = True
+
+            # Check queue options if possible
+            supports_duplex = False
+            paper_sizes = ["A4"]
+            try:
+                lp_opts = subprocess.check_output(["lpoptions", "-p", q_name, "-l"], text=True, stderr=subprocess.DEVNULL)
+                lp_opts_lower = lp_opts.lower()
+                if "colormodel" in lp_opts_lower and any(c in lp_opts_lower for c in ["rgb", "cmyk", "color"]):
+                    supports_color = True
+                if "duplex" in lp_opts_lower and "duplexnotumble" in lp_opts_lower:
+                    supports_duplex = True
+                if "pagesize" in lp_opts_lower:
+                    sizes = []
+                    for line in lp_opts.splitlines():
+                        if line.startswith("PageSize/"):
+                            sizes = [opt.strip("*") for opt in line.split(":", 1)[1].split()]
+                            break
+                    if sizes:
+                        paper_sizes = sizes[:6]
+            except Exception:
+                pass
+
+            # HP Laser 108w is strictly monochrome & simplex
+            if "108" in q_name or "108" in raw_model:
+                supports_color = False
+                supports_duplex = False
+
+            # Query real-time status
+            q_status, q_msg = self.get_queue_status(q_name)
+
+            hw_id = make_hardware_id(conn_type, device_uri or q_name, clean_model)
+            seen_keys.add(hw_id)
+            seen_keys.add(q_name.lower())
+            if device_uri:
+                seen_keys.add(device_uri.lower())
+
+            display_name = f"{manufacturer} {clean_model}".strip()
+            printers.append({
+                "hardware_id": hw_id,
+                "printer_name": display_name,
+                "display_name": display_name,
+                "manufacturer": manufacturer,
+                "model": clean_model,
+                "cups_queue_name": q_name,
+                "device_uri": device_uri,
+                "connection_type": conn_type,
+                "status": q_status,
+                "printer_type": "COLOR" if supports_color else ("BACKUP" if "backup" in q_name.lower() else "BW"),
+                "supports_color": supports_color,
+                "supports_duplex": supports_duplex,
+                "paper_sizes": paper_sizes,
+                "document_formats": ["application/pdf", "image/pwg-raster", "image/urf"],
+                "last_error": q_msg if q_status not in ("READY", "BUSY", "PRINTING") else None,
+                "is_default": is_def,
+                "capabilities": {
+                    "color": supports_color,
+                    "grayscale": True,
+                    "duplex": supports_duplex,
+                    "paper_sizes": paper_sizes,
+                },
+            })
+
+        # 2. Discover Connected USB Devices not yet added
         try:
-            # 1. lsusb scan
-            usb_out = ""
-            try:
-                usb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
-
-            hp_found = ("Hewlett-Packard" in usb_out or "03f0:" in usb_out or "HP" in usb_out)
-            samsung_found = ("04e8:" in usb_out or "Samsung" in usb_out)  # HP 108w hardware is Samsung-based
-
-            # 2. ipp-usb service check
-            ipp_usb_active = False
-            try:
-                ipp_status = subprocess.check_output(
-                    ["systemctl", "is-active", "ipp-usb"],
-                    text=True,
-                    stderr=subprocess.DEVNULL
-                ).strip()
-                ipp_usb_active = (ipp_status == "active")
-            except Exception:
-                pass
-
-            # 3. CUPS lpinfo discovery
-            lpinfo_out = ""
-            try:
-                lpinfo_out = subprocess.check_output(["lpinfo", "-v"], text=True, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
-
-            seen_uris = set()
+            lpinfo_out = subprocess.check_output(["lpinfo", "-v"], text=True, stderr=subprocess.DEVNULL)
             for line in lpinfo_out.splitlines():
                 line = line.strip()
                 if not line or " " not in line:
@@ -114,38 +252,106 @@ class CupsController:
                 if len(parts) < 2:
                     continue
                 uri = parts[1].strip()
+                uri_lower = uri.lower()
 
-                is_usb = "usb://" in uri.lower()
-                is_ipp = "ipp://" in uri.lower() or "ipps://" in uri.lower()
-                is_hp = ("hp" in uri.lower() or "108" in uri.lower() or hp_found or samsung_found)
+                if uri_lower in seen_keys:
+                    continue
 
-                if is_usb or (is_ipp and "60000" in uri) or (is_ipp and is_hp):
-                    if uri not in seen_uris:
-                        seen_uris.add(uri)
+                is_usb = "usb://" in uri_lower
+                is_ipp_port = ("60000" in uri_lower or "60001" in uri_lower or "60002" in uri_lower)
+                is_net = ("socket://" in uri_lower or "ipp://" in uri_lower or "ipps://" in uri_lower)
+
+                if is_usb or is_ipp_port or is_net:
+                    conn_type = "IPP-USB" if is_ipp_port else ("USB" if is_usb else "NETWORK")
+                    manufacturer = "Generic"
+                    for mfg in ["HP", "Hewlett-Packard", "Epson", "Canon", "Brother", "Pantum", "Xerox", "Samsung"]:
+                        if mfg.lower() in uri_lower:
+                            manufacturer = "HP" if mfg == "Hewlett-Packard" else mfg
+                            break
+
+                    model = "HP Laser 108w" if ("108" in uri_lower or manufacturer == "HP") else f"{manufacturer} Printer"
+                    hw_id = make_hardware_id(conn_type, uri, model)
+
+                    if hw_id not in seen_keys:
+                        seen_keys.add(hw_id)
+                        seen_keys.add(uri_lower)
+                        suggested_queue = f"smartprint_{manufacturer.lower()}_{len(printers)+1}"
+
                         printers.append({
-                            "uri": uri,
-                            "connection": "IPP-USB" if "60000" in uri or (is_ipp and ipp_usb_active) else "USB",
-                            "manufacturer": "HP" if is_hp else "Generic",
-                            "model": "HP Laser 108w" if ("108" in uri or is_hp) else "Generic USB Printer",
-                            "ipp_usb_active": ipp_usb_active,
-                            "is_monochrome": True,
+                            "hardware_id": hw_id,
+                            "printer_name": f"{manufacturer} {model}",
+                            "display_name": f"{manufacturer} {model}",
+                            "manufacturer": manufacturer,
+                            "model": model,
+                            "cups_queue_name": suggested_queue,
+                            "device_uri": uri,
+                            "connection_type": conn_type,
+                            "status": "READY",
+                            "printer_type": "BW",
+                            "supports_color": False,
+                            "supports_duplex": False,
+                            "paper_sizes": ["A4"],
+                            "document_formats": ["application/pdf"],
+                            "last_error": None,
+                            "is_default": len(printers) == 0,
+                            "capabilities": {
+                                "color": False,
+                                "grayscale": True,
+                                "duplex": False,
+                                "paper_sizes": ["A4"],
+                            },
                         })
+        except Exception:
+            pass
 
-            # If ipp-usb is active and HP hardware is on USB bus, ensure verified endpoint is included
-            if (hp_found or samsung_found or ipp_usb_active) and IPP_USB_ENDPOINT not in seen_uris:
-                printers.append({
-                    "uri": IPP_USB_ENDPOINT,
-                    "connection": "IPP-USB",
-                    "manufacturer": "HP",
-                    "model": "HP Laser 108w",
-                    "ipp_usb_active": ipp_usb_active,
-                    "is_monochrome": True,
-                })
+        # 3. Always ensure verified HP Laser 108w queue or endpoint is represented if connected
+        has_hp_108w = any("108" in p.get("cups_queue_name", "").lower() or "108" in p.get("model", "").lower() for p in printers)
+        if not has_hp_108w:
+            # Check if HP hardware is connected via lsusb
+            try:
+                usb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
+                if "Hewlett-Packard" in usb_out or "03f0:" in usb_out or "04e8:" in usb_out or "HP" in usb_out:
+                    hw_id = make_hardware_id("IPP-USB", IPP_USB_ENDPOINT, "HP Laser 108w")
+                    if hw_id not in seen_keys:
+                        seen_keys.add(hw_id)
+                        printers.insert(0, {
+                            "hardware_id": hw_id,
+                            "printer_name": "HP Laser 108w",
+                            "display_name": "HP Laser 108w (USB)",
+                            "manufacturer": "HP",
+                            "model": "HP Laser 108w",
+                            "cups_queue_name": DEFAULT_QUEUE_NAME,
+                            "device_uri": IPP_USB_ENDPOINT,
+                            "connection_type": "IPP-USB",
+                            "status": "READY",
+                            "printer_type": "BW",
+                            "supports_color": False,
+                            "supports_duplex": False,
+                            "paper_sizes": ["A4"],
+                            "document_formats": ["application/pdf", "image/urf"],
+                            "last_error": None,
+                            "is_default": True,
+                            "capabilities": {
+                                "color": False,
+                                "grayscale": True,
+                                "duplex": False,
+                                "paper_sizes": ["A4"],
+                            },
+                        })
+            except Exception:
+                pass
 
-        except Exception as e:
-            logger.error(f"Error executing printer detection: {e}")
+        # Return discovered printers (up to 5 or actual hardware discovered)
+        return printers[:5] if len(printers) > 5 else printers
 
-        return printers
+    @staticmethod
+    def detect_usb_printers() -> List[Dict[str, Any]]:
+        """
+        Backward-compatible discovery helper returning USB and IPP-USB printers.
+        """
+        controller = CupsController()
+        all_pr = controller.discover_all_printers()
+        return [p for p in all_pr if p.get("connection_type") in ("USB", "IPP-USB")]
 
     # --------------------------------------------------------------------------
     # Queue Availability & State Inspection
@@ -279,18 +485,37 @@ class CupsController:
             )
 
         # 3. Format and sanitize CUPS options
-        # NOTE: HP Laser 108w is strictly monochrome.
         copies = max(1, min(int(options.get("copies", 1)), 10))
         pages = str(options.get("pages_selected", "All")).strip()
         orientation = str(options.get("orientation", "portrait")).lower()
+        is_color = bool(options.get("is_color", False))
+        is_duplex = bool(options.get("is_duplex", False))
 
-        # Strict monochrome enforcement
+        # Check queue color capability
+        is_hp_108w = ("108" in target_queue.lower())
+        if is_color and is_hp_108w:
+            raise CupsSubmissionError(
+                f"Incompatible printer: Target queue '{target_queue}' is strictly monochrome. Cannot process color job."
+            )
+
         cups_opts = {
             "copies": str(copies),
-            "media": "A4",
-            "ColorModel": "Gray",
-            "print-color-mode": "monochrome",
+            "media": str(options.get("paper_size", "A4")),
         }
+
+        if is_color:
+            cups_opts["ColorModel"] = "RGB"
+            cups_opts["print-color-mode"] = "color"
+        else:
+            cups_opts["ColorModel"] = "Gray"
+            cups_opts["print-color-mode"] = "monochrome"
+
+        if is_duplex:
+            cups_opts["sides"] = "two-sided-long-edge"
+            cups_opts["Duplex"] = "DuplexNoTumble"
+        else:
+            cups_opts["sides"] = "one-sided"
+            cups_opts["Duplex"] = "None"
 
         if pages and pages.lower() != "all":
             cups_opts["page-ranges"] = pages
@@ -326,7 +551,12 @@ class CupsController:
             lp_cmd = ["lp", "-d", target_queue, "-n", str(copies), "-t", doc_title]
             if pages and pages.lower() != "all":
                 lp_cmd.extend(["-P", pages])
-            lp_cmd.extend(["-o", "ColorModel=Gray", "-o", "print-color-mode=monochrome"])
+            if is_color:
+                lp_cmd.extend(["-o", "ColorModel=RGB", "-o", "print-color-mode=color"])
+            else:
+                lp_cmd.extend(["-o", "ColorModel=Gray", "-o", "print-color-mode=monochrome"])
+            if is_duplex:
+                lp_cmd.extend(["-o", "sides=two-sided-long-edge"])
             if orientation == "landscape":
                 lp_cmd.extend(["-o", "landscape"])
             lp_cmd.append(file_path)

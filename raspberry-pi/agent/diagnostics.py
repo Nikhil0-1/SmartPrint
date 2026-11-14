@@ -68,20 +68,25 @@ def run_diagnostics(as_json: bool = False) -> Dict[str, Any]:
     except Exception as e:
         record_check("backend_api", "FAIL", f"Cannot reach {health_url}: {e}")
 
-    # 3. CUPS Availability & HP Laser 108w Queue
+    # 3. Multi-Printer & CUPS Queues Availability
     cups_ctrl = CupsController(default_queue=config.get("cups_queue", DEFAULT_QUEUE_NAME))
-    q_name = cups_ctrl.default_queue
-    q_status, q_msg = cups_ctrl.get_queue_status(q_name)
-    if q_status == "READY":
-        record_check("cups_queue", "PASS", f"Queue '{q_name}' is READY ({q_msg})")
-    elif q_status == "BUSY":
-        record_check("cups_queue", "PASS", f"Queue '{q_name}' is BUSY printing ({q_msg})")
-    elif q_status in ("PAPER_OUT", "TONER_EMPTY"):
-        record_check("cups_queue", "WARN", f"Queue '{q_name}' needs supply: {q_status} ({q_msg})")
-    elif q_status == "STOPPED":
-        record_check("cups_queue", "WARN", f"Queue '{q_name}' is STOPPED: {q_msg}")
+    discovered_printers = cups_ctrl.discover_all_printers()
+    if discovered_printers:
+        ready_count = sum(1 for p in discovered_printers if p.get("status") in ("READY", "PRINTING", "BUSY"))
+        summary = f"{len(discovered_printers)} printer(s) discovered ({ready_count} READY): " + ", ".join(
+            f"{p['cups_queue_name']}={p['status']}" for p in discovered_printers
+        )
+        if ready_count > 0:
+            record_check("cups_multi_printers", "PASS", summary)
+        else:
+            record_check("cups_multi_printers", "WARN", summary)
     else:
-        record_check("cups_queue", "FAIL", f"Queue '{q_name}' status: {q_status} ({q_msg})")
+        q_name = cups_ctrl.default_queue
+        q_status, q_msg = cups_ctrl.get_queue_status(q_name)
+        if q_status == "READY":
+            record_check("cups_queue", "PASS", f"Default queue '{q_name}' is READY ({q_msg})")
+        else:
+            record_check("cups_queue", "WARN", f"Default queue '{q_name}': {q_status} ({q_msg})")
 
     # 4. IPP-USB Service
     try:

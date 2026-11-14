@@ -398,7 +398,46 @@ class StateManager:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM job_state WHERE job_id = ?", (job_id,))
             row = cursor.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            res = dict(row)
+            if "status" in res and "current_state" not in res:
+                res["current_state"] = res["status"]
+            return res
+
+    def get_job_state(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Alias for get_job returning state record with current_state."""
+        return self.get_job(job_id)
+
+    def record_state_history(
+        self,
+        job_id: str,
+        from_state: Optional[str],
+        to_state: str,
+        details: Optional[str] = None
+    ) -> None:
+        """Explicitly records an event, status transition, or failover in job state history."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO job_state_history (job_id, from_status, to_status, details)
+                VALUES (?, ?, ?, ?)
+                """,
+                (job_id, from_state or "NONE", to_state, details or ""),
+            )
+            conn.commit()
+
+    def get_job_history(self, job_id: str) -> List[Dict[str, Any]]:
+        """Returns ordered history records for a specific job."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM job_state_history WHERE job_id = ? ORDER BY id ASC",
+                (job_id,)
+            )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
 
     def get_job_by_idempotency_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
         """Fetches job record by idempotency_key."""

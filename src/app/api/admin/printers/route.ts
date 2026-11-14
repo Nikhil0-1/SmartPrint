@@ -6,6 +6,7 @@ import {
   dbGetPrinters,
   dbCreatePrinter,
   dbUpdatePrinter,
+  dbDeletePrinter,
   dbWriteAuditLog,
 } from '@/lib/db';
 
@@ -163,6 +164,42 @@ export async function PATCH(request: Request) {
     });
 
     return NextResponse.json({ success: true, printer: dbUpdated || storeUpdated });
+  } catch (error) {
+    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const auth = await authenticateRequest(request);
+    if (!auth.authenticated || !auth.user) {
+      return NextResponse.json({ error: auth.error || 'Authentication required' }, { status: auth.status });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get('id');
+    const adminEmail = auth.user.email;
+
+    if (!id) {
+      return NextResponse.json({ error: 'printer id is required' }, { status: 400 });
+    }
+
+    const dbSuccess = await dbDeletePrinter(id);
+    const storeSuccess = store.deletePrinter(id, adminEmail);
+
+    if (!dbSuccess && !storeSuccess) {
+      return NextResponse.json({ error: 'Failed to delete printer' }, { status: 500 });
+    }
+
+    await dbWriteAuditLog({
+      admin_email: adminEmail,
+      action: 'DELETE_PRINTER',
+      target_type: 'printer',
+      target_id: id,
+      details: { deleted_at: new Date().toISOString() },
+    });
+
+    return NextResponse.json({ success: true, id });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }

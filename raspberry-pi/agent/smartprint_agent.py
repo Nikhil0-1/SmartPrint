@@ -228,6 +228,7 @@ class SmartPrintAgent:
         self.state_mgr = StateManager(state_dir=state_dir)
         self.cups = CupsController(default_queue=self.config.get("cups_queue", "HP_Laser_108w"))
         self.doc_mgr = DocumentManager(state_dir=state_dir)
+        self.routing_config: Dict[str, Any] = {}
         self.running = True
 
         # Register OS signal handlers for graceful shutdown
@@ -314,13 +315,26 @@ class SmartPrintAgent:
             return
 
         cpu_temp, ram_pct, disk_pct = get_system_telemetry()
-        printer_status, printer_msg = self.cups.get_queue_status()
         hw_model = get_hardware_model() or self.config.get("hardware_model")
         local_ip = get_local_ip() or self.config.get("ip_address")
+
+        # Discover all connected multi-printers (up to 5+)
+        printers_telemetry = self.cups.discover_all_printers()
+
+        # Primary printer status
+        printer_status, printer_msg = self.cups.get_queue_status()
+        if isinstance(printers_telemetry, list) and printers_telemetry and isinstance(printers_telemetry[0], dict):
+            default_p = next((p for p in printers_telemetry if isinstance(p, dict) and p.get("is_default")), None)
+            if not default_p and isinstance(printers_telemetry[0], dict):
+                default_p = printers_telemetry[0]
+            if isinstance(default_p, dict) and default_p.get("status"):
+                printer_status = default_p.get("status") or printer_status
+                printer_msg = default_p.get("last_error") or printer_msg or f"{default_p.get('manufacturer', '')} {default_p.get('model', '')} {printer_status}".strip()
 
         telemetry = {
             "kiosk_id": self.config["kiosk_id"],
             "agent_version": self.config.get("agent_version", "1.0.0"),
+            "printers": printers_telemetry,
         }
         if cpu_temp is not None:
             telemetry["cpu_temp"] = cpu_temp
@@ -340,12 +354,16 @@ class SmartPrintAgent:
         res = self.make_api_request("/api/kiosk/heartbeat", payload=telemetry, method="POST")
         if res.get("success"):
             data = res.get("data", {})
+            if data.get("routing"):
+                self.routing_config = data["routing"]
+
             temp_str = f"{cpu_temp}°C" if cpu_temp is not None else "N/A"
             ram_str = f"{ram_pct}%" if ram_pct is not None else "N/A"
             disk_str = f"{disk_pct}%" if disk_pct is not None else "N/A"
+            pr_count = len(printers_telemetry)
             logger.info(
                 f"Heartbeat OK | Model: {hw_model or 'N/A'} | IP: {local_ip or 'N/A'} | "
-                f"Temp: {temp_str} | RAM: {ram_str} | Disk: {disk_str} | Printer: {printer_status}"
+                f"Printers: {pr_count} active | Temp: {temp_str} | RAM: {ram_str} | Disk: {disk_str} | Primary: {printer_status}"
             )
             if data.get("maintenance_mode"):
                 logger.warning("Kiosk is currently in MAINTENANCE MODE.")
@@ -608,23 +626,83 @@ class SmartPrintAgent:
             "status": "PROCESSING"
         })
 
-        # Step F: Pre-check Queue Readiness
+        # Step F: Pre-check Queue Readiness & Multi-Printer Failover
         q_status, q_msg = self.cups.get_queue_status(target_queue)
         if q_status in ("STOPPED", "OFFLINE", "ERROR", "PAPER_OUT", "TONER_EMPTY"):
-            err_text = f"Printer queue '{target_queue}' not ready ({q_status}): {q_msg}"
-            logger.error(err_text)
-            self.doc_mgr.preserve_for_recovery(
-                job_id, local_file_path, {"status": q_status, "error": q_msg, "queue": target_queue}
+            logger.warning(
+                f"Primary queue '{target_queue}' is unavailable ({q_status}: {q_msg}). "
+                f"Evaluating multi-printer failover..."
             )
-            self.state_mgr.transition_status(
-                job_id, STATE_RECOVERY_REQUIRED, error_message=err_text, recovery_reason=q_status
-            )
-            self.make_api_request("/api/kiosk/update-status", {
-                "job_id": job_id,
-                "status": "RECOVERY_REQUIRED",
-                "error_message": err_text
-            })
-            return
+
+            # Check if auto backup rerouting is permissible
+            is_job_color = bool(job.get("is_color", False))
+            is_job_duplex = bool(job.get("is_duplex", False))
+            backup_queue: Optional[str] = None
+
+            # Query all active discovered printers on kiosk
+            discovered = self.cups.discover_all_printers()
+            ready_printers = [
+                p for p in discovered
+                if p.get("cups_queue_name") != target_queue
+                and p.get("status") == "READY"
+            ]
+
+            if is_job_color:
+                # Color jobs require strict color support
+                color_ready = [
+                    p for p in ready_printers
+                    if p.get("supports_color") and (not is_job_duplex or p.get("supports_duplex"))
+                ]
+                if color_ready:
+                    backup_queue = color_ready[0].get("cups_queue_name")
+            else:
+                # Monochrome jobs prefer mono printers, with safe color printer fallback
+                mono_ready = [
+                    p for p in ready_printers
+                    if not p.get("supports_color") and (not is_job_duplex or p.get("supports_duplex"))
+                ]
+                if mono_ready:
+                    backup_queue = mono_ready[0].get("cups_queue_name")
+                elif ready_printers:
+                    color_fallback = [
+                        p for p in ready_printers
+                        if not is_job_duplex or p.get("supports_duplex")
+                    ]
+                    if color_fallback:
+                        backup_queue = color_fallback[0].get("cups_queue_name")
+
+            if backup_queue:
+                logger.info(
+                    f"FAILOVER TRIGGERED: Rerouted job {job_id} from '{target_queue}' to backup queue '{backup_queue}' "
+                    f"(Reason: Primary was {q_status} - {q_msg})"
+                )
+                self.state_mgr.record_state_history(
+                    job_id=job_id,
+                    from_state=STATE_PROCESSING,
+                    to_state=STATE_PROCESSING,
+                    details=f"Failover to {backup_queue} due to primary {target_queue} status {q_status}: {q_msg}"
+                )
+                self.make_api_request("/api/kiosk/update-status", {
+                    "job_id": job_id,
+                    "status": "PROCESSING",
+                    "message": f"Rerouted to backup queue '{backup_queue}' (Primary '{target_queue}' is {q_status})"
+                })
+                target_queue = backup_queue
+            else:
+                err_text = f"Printer queue '{target_queue}' not ready ({q_status}): {q_msg}. No compatible backup printer ready."
+                logger.error(err_text)
+                self.doc_mgr.preserve_for_recovery(
+                    job_id, local_file_path, {"status": q_status, "error": q_msg, "queue": target_queue}
+                )
+                self.state_mgr.transition_status(
+                    job_id, STATE_RECOVERY_REQUIRED, error_message=err_text, recovery_reason=q_status
+                )
+                self.make_api_request("/api/kiosk/update-status", {
+                    "job_id": job_id,
+                    "status": "RECOVERY_REQUIRED",
+                    "error_message": err_text
+                })
+                return
 
         # Step G: CUPS Submission (Exactly Once)
         self.state_mgr.transition_status(job_id, STATE_SUBMITTING_TO_CUPS)
@@ -632,9 +710,10 @@ class SmartPrintAgent:
         options = {
             "copies": job.get("copies", 1),
             "pages_selected": job.get("pages_selected", "All"),
-            "is_color": False,  # HP Laser 108w is strictly monochrome
-            "is_duplex": job.get("is_duplex", False),
+            "is_color": bool(job.get("is_color", False)),
+            "is_duplex": bool(job.get("is_duplex", False)),
             "orientation": job.get("orientation", "portrait"),
+            "paper_size": job.get("paper_size", "A4"),
         }
 
         cups_job_id: Optional[int] = None

@@ -1,5 +1,12 @@
 import { NextResponse } from 'next/server';
-import { dbGetKiosk, dbUpdateKioskHeartbeat, dbUpdateDeviceHeartbeat } from '@/lib/db';
+import {
+  dbGetKiosk,
+  dbUpdateKioskHeartbeat,
+  dbUpdateDeviceHeartbeat,
+  dbUpsertDiscoveredPrinters,
+  dbGetRouting,
+} from '@/lib/db';
+import { store } from '@/lib/store';
 import { supabaseAdmin, isSupabaseConfigured } from '@/lib/supabase';
 import { authenticateDeviceRequest } from '@/lib/deviceAuth';
 
@@ -107,12 +114,27 @@ export async function POST(request: Request) {
       });
     }
 
-    // 5. Re-fetch fresh maintenance_mode for agent response
+    // 5. Multi-Printer Telemetry & Auto-Discovery Upsert (Up to 5+ Printers)
+    let printersSynced = 0;
+    if (Array.isArray(payload.printers) && payload.printers.length > 0) {
+      try {
+        const result = await dbUpsertDiscoveredPrinters(kioskId, payload.printers);
+        store.upsertDiscoveredPrinters(kioskId, payload.printers);
+        printersSynced = result.updatedCount + result.addedCount;
+      } catch (prErr) {
+        console.warn('[HEARTBEAT] Multi-printer upsert error:', prErr);
+      }
+    }
+
+    // 6. Re-fetch fresh maintenance_mode and active routing for agent response
     const refreshed = await dbGetKiosk(kioskId);
+    const routing = (await dbGetRouting(kioskId)) || store.getRouting(kioskId) || null;
 
     return NextResponse.json({
       success: true,
       maintenance_mode: refreshed?.maintenance_mode ?? false,
+      routing,
+      printers_synced: printersSynced,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {

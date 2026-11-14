@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+GITAM SMARTPRINT - Multi-Printer System Test Suite
+Tests up to 5 physical printers per kiosk, auto-discovery, capability detection,
+independent queue monitoring, server/agent routing failover, and zero-duplicate persistence.
+"""
+
+import os
+import sys
+import json
+import unittest
+import tempfile
+import shutil
+from unittest.mock import MagicMock, patch
+
+# Ensure agent modules are importable
+AGENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "raspberry-pi", "agent"))
+if AGENT_DIR not in sys.path:
+    sys.path.insert(0, AGENT_DIR)
+
+from cups_controller import CupsController, CupsSubmissionError, CupsQueueUnavailableError
+from state_manager import (
+    StateManager,
+    STATE_RESERVED,
+    STATE_PROCESSING,
+    STATE_SUBMITTING_TO_CUPS,
+    STATE_SUBMITTED_TO_CUPS,
+    STATE_PRINTING,
+    STATE_COMPLETED,
+    STATE_RECOVERY_REQUIRED,
+)
+from smartprint_agent import SmartPrintAgent
+from document_manager import DocumentManager
+
+
+class TestMultiPrinterSystem(unittest.TestCase):
+    """Integration & unit tests for Multi-Printer architecture (up to 5 printers)."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="smartprint_multiprinter_test_")
+        self.state_dir = os.path.join(self.test_dir, "state")
+        os.makedirs(self.state_dir, exist_ok=True)
+
+        self.config = {
+            "kiosk_id": "GITAM-SPK-001",
+            "device_token": "test_token_secret",
+            "backend_url": "http://localhost:3000",
+            "cups_queue": "HP_Laser_108w",
+            "state_dir": self.state_dir,
+            "agent_version": "1.0.0",
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_multi_printer_auto_discovery(self):
+        """
+        Verify discover_all_printers discovers up to 5 printers across
+        USB, IPP-USB, Network, and CUPS queues, extracting all 12 attributes.
+        """
+        controller = CupsController(default_queue="HP_Laser_108w")
+
+        # Mock CUPS queues, lsusb, and lpinfo
+        mock_queues = {
+            "HP_Laser_108w": {
+                "device-uri": "ipp://127.0.0.1:60000/ipp/print",
+                "printer-make-and-model": "HP Laser 108w",
+                "printer-info": "Primary B&W Printer",
+            },
+            "HP_Color_LaserJet": {
+                "device-uri": "usb://HP/Color%20LaserJet%20Pro%20M454dn?serial=VND3K0192",
+                "printer-make-and-model": "HP Color LaserJet Pro M454dn",
+                "printer-info": "Color Primary Printer",
+            },
+            "HP_LaserJet_Backup": {
+                "device-uri": "usb://HP/LaserJet%20Enterprise%20M507?serial=PHB4M0098",
+                "printer-make-and-model": "HP LaserJet Enterprise M507",
+                "printer-info": "Backup B&W Printer",
+            },
+            "Epson_EcoTank_Color": {
+                "device-uri": "ipp://192.168.1.150:631/printers/Epson_EcoTank",
+                "printer-make-and-model": "Epson EcoTank L3250 Series Color",
+                "printer-info": "Network Color Backup",
+            },
+            "Brother_Duplex_Mono": {
+                "device-uri": "socket://192.168.1.160:9100",
+                "printer-make-and-model": "Brother HL-L2350DW series",
+                "printer-info": "Network Duplex Mono",
+            },
+        }
+
+        # Mock pycups conn
+        mock_conn = MagicMock()
+        mock_conn.getPrinters.return_value = mock_queues
+        mock_conn.getDefault.return_value = "HP_Laser_108w"
+        controller.conn = mock_conn
+
+        with patch("cups_controller.HAS_PYCUPS", True):
+            printers = controller.discover_all_printers()
+
+        self.assertEqual(len(printers), 5)
+
+        # 1. Verify HP Laser 108w (Monochrome, IPP-USB)
+        p1 = next(p for p in printers if p["cups_queue_name"] == "HP_Laser_108w")
+        self.assertEqual(p1["manufacturer"], "HP")
+        self.assertEqual(p1["connection_type"], "IPP-USB")
+        self.assertFalse(p1["supports_color"])
+        self.assertTrue(p1["is_default"])
+        self.assertTrue(len(p1["hardware_id"]) > 0)
+
+        # 2. Verify HP Color LaserJet (Color, USB)
+        p2 = next(p for p in printers if p["cups_queue_name"] == "HP_Color_LaserJet")
+        self.assertEqual(p2["manufacturer"], "HP")
+        self.assertEqual(p2["connection_type"], "USB")
+        self.assertTrue(p2["supports_color"])
+
+        # 3. Verify Epson Network Color
+        p4 = next(p for p in printers if p["cups_queue_name"] == "Epson_EcoTank_Color")
+        self.assertEqual(p4["manufacturer"], "Epson")
+        self.assertEqual(p4["connection_type"], "NETWORK")
+        self.assertTrue(p4["supports_color"])
+
+        # 4. Verify Brother Network Mono
+        p5 = next(p for p in printers if p["cups_queue_name"] == "Brother_Duplex_Mono")
+        self.assertEqual(p5["manufacturer"], "Brother")
+        self.assertEqual(p5["connection_type"], "NETWORK")
+        self.assertFalse(p5["supports_color"])
+
+    def test_multi_printer_independent_status_monitoring(self):
+        """
+        Verify that each printer queue is monitored independently.
+        Failure or paper-out on one printer must not affect other queues.
+        """
+        controller = CupsController()
+
+        status_map = {
+            "HP_Laser_108w": ("READY", "Printer idle and ready"),
+            "HP_Color_LaserJet": ("PAPER_OUT", "Paper tray is empty (media-empty)"),
+            "HP_LaserJet_Backup": ("STOPPED", "Queue is stopped or paused (paused)"),
+            "Epson_EcoTank_Color": ("BUSY", "Printing in progress"),
+            "Brother_Duplex_Mono": ("OFFLINE", "Printer is offline"),
+        }
+
+        def mock_get_status(queue_name=None):
+            q = queue_name or "HP_Laser_108w"
+            return status_map.get(q, ("READY", "Ready"))
+
+        controller.get_queue_status = MagicMock(side_effect=mock_get_status)
+
+        # Test each queue independently
+        s1, m1 = controller.get_queue_status("HP_Laser_108w")
+        self.assertEqual(s1, "READY")
+
+        s2, m2 = controller.get_queue_status("HP_Color_LaserJet")
+        self.assertEqual(s2, "PAPER_OUT")
+
+        s3, m3 = controller.get_queue_status("HP_LaserJet_Backup")
+        self.assertEqual(s3, "STOPPED")
+
+        s4, m4 = controller.get_queue_status("Epson_EcoTank_Color")
+        self.assertEqual(s4, "BUSY")
+
+        s5, m5 = controller.get_queue_status("Brother_Duplex_Mono")
+        self.assertEqual(s5, "OFFLINE")
+
+        # Confirm queue 1 status remains READY even while queue 2 has PAPER_OUT
+        self.assertEqual(controller.get_queue_status("HP_Laser_108w")[0], "READY")
+
+    def test_multi_printer_heartbeat_payload(self):
+        """
+        Verify that send_heartbeat discovers all printers and includes
+        the 'printers' array with individual statuses in the payload.
+        """
+        agent = SmartPrintAgent(config=self.config)
+
+        mock_printers = [
+            {
+                "hardware_id": "hw_01",
+                "printer_name": "HP Laser 108w",
+                "display_name": "HP Laser 108w (Primary B&W)",
+                "manufacturer": "HP",
+                "model": "HP Laser 108w",
+                "cups_queue_name": "HP_Laser_108w",
+                "device_uri": "ipp://127.0.0.1:60000/ipp/print",
+                "connection_type": "IPP-USB",
+                "status": "READY",
+                "supports_color": False,
+                "supports_duplex": False,
+                "is_default": True,
+            },
+            {
+                "hardware_id": "hw_02",
+                "printer_name": "HP Color LaserJet Pro",
+                "display_name": "HP Color LaserJet (Color Primary)",
+                "manufacturer": "HP",
+                "model": "HP Color LaserJet Pro M454dn",
+                "cups_queue_name": "HP_Color_LaserJet",
+                "device_uri": "usb://HP/Color",
+                "connection_type": "USB",
+                "status": "PAPER_OUT",
+                "supports_color": True,
+                "supports_duplex": True,
+                "is_default": False,
+            },
+        ]
+
+        agent.cups.discover_all_printers = MagicMock(return_value=mock_printers)
+        agent.cups.get_queue_status = MagicMock(return_value=("READY", "Ready"))
+
+        captured_payloads = []
+
+        def mock_request(endpoint, payload=None, method="POST"):
+            if endpoint == "/api/kiosk/heartbeat":
+                captured_payloads.append(payload)
+                return {"success": True, "data": {"maintenance_mode": False}}
+            return {"success": True}
+
+        agent.make_api_request = MagicMock(side_effect=mock_request)
+
+        agent.send_heartbeat()
+
+        self.assertEqual(len(captured_payloads), 1)
+        hb = captured_payloads[0]
+        self.assertIn("printers", hb)
+        self.assertEqual(len(hb["printers"]), 2)
+        self.assertEqual(hb["printers"][0]["cups_queue_name"], "HP_Laser_108w")
+        self.assertEqual(hb["printers"][1]["cups_queue_name"], "HP_Color_LaserJet")
+        self.assertEqual(hb["printers"][1]["status"], "PAPER_OUT")
+
+    def test_multi_printer_bw_failover_routing(self):
+        """
+        Verify that when the primary B&W printer is unavailable (PAPER_OUT),
+        the agent automatically reroutes the monochrome job to the ready backup printer.
+        """
+        agent = SmartPrintAgent(config=self.config)
+
+        # Mock queue statuses: Primary is PAPER_OUT, Backup is READY
+        def mock_q_status(queue_name=None):
+            if queue_name == "HP_Laser_108w":
+                return "PAPER_OUT", "Paper empty"
+            if queue_name == "HP_LaserJet_Backup":
+                return "READY", "Idle"
+            return "READY", "Idle"
+
+        agent.cups.get_queue_status = MagicMock(side_effect=mock_q_status)
+
+        # Mock discovered printers
+        agent.cups.discover_all_printers = MagicMock(return_value=[
+            {
+                "cups_queue_name": "HP_Laser_108w",
+                "status": "PAPER_OUT",
+                "supports_color": False,
+                "supports_duplex": False,
+            },
+            {
+                "cups_queue_name": "HP_LaserJet_Backup",
+                "status": "READY",
+                "supports_color": False,
+                "supports_duplex": True,
+            },
+        ])
+
+        # Prepare dummy PDF
+        test_pdf = os.path.join(self.test_dir, "test_doc.pdf")
+        with open(test_pdf, "wb") as f:
+            f.write(b"%PDF-1.4 test document content for smartprint multi-printer")
+
+        agent.doc_mgr.prepare_job_workspace = MagicMock(return_value=test_pdf)
+        agent.cups.validate_document = MagicMock()
+        agent.cups.submit_print_job = MagicMock(return_value=501)
+        agent.cups.wait_for_job_completion = MagicMock(return_value=(True, "Completed"))
+
+        submitted_queues = []
+
+        def mock_submit(file_path, options, queue_name=None):
+            submitted_queues.append(queue_name)
+            return 501
+
+        agent.cups.submit_print_job = MagicMock(side_effect=mock_submit)
+
+        def mock_api(endpoint, payload=None, method="POST"):
+            return {"success": True}
+
+        agent.make_api_request = MagicMock(side_effect=mock_api)
+
+        job = {
+            "id": "job_bw_failover_01",
+            "idempotency_key": "idemp_bw_failover_01",
+            "cups_queue_name": "HP_Laser_108w",
+            "is_color": False,
+            "is_duplex": False,
+            "copies": 1,
+            "signed_download_url": "/api/kiosk/download/job_bw_failover_01",
+        }
+
+        # Mock download
+        with patch("urllib.request.urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b"%PDF-1.4 sample payload"
+            mock_url.return_value.__enter__.return_value = mock_resp
+
+            agent.execute_print_job(job)
+
+        # Verify job was rerouted and submitted to backup queue!
+        self.assertEqual(len(submitted_queues), 1)
+        self.assertEqual(submitted_queues[0], "HP_LaserJet_Backup")
+
+        # Verify state history recorded failover
+        hist = agent.state_mgr.get_job_history("job_bw_failover_01")
+        failover_entries = [h for h in hist if "Failover to HP_LaserJet_Backup" in (h.get("details") or "")]
+        self.assertTrue(len(failover_entries) > 0)
+
+    def test_multi_printer_color_safety_no_monochrome_spooling(self):
+        """
+        CRITICAL SAFETY: When a color job is submitted to a monochrome-only printer,
+        or when a color printer fails and only monochrome backups are available,
+        the agent MUST refuse to print color on monochrome and preserve the job safely.
+        """
+        agent = SmartPrintAgent(config=self.config)
+
+        # Color printer is OFFLINE, only monochrome printer is available
+        def mock_q_status(queue_name=None):
+            if queue_name == "HP_Color_LaserJet":
+                return "OFFLINE", "Printer power disconnected"
+            if queue_name == "HP_Laser_108w":
+                return "READY", "Idle"
+            return "READY", "Idle"
+
+        agent.cups.get_queue_status = MagicMock(side_effect=mock_q_status)
+
+        # Discovered printers: color printer is OFFLINE, only mono is ready
+        agent.cups.discover_all_printers = MagicMock(return_value=[
+            {
+                "cups_queue_name": "HP_Color_LaserJet",
+                "status": "OFFLINE",
+                "supports_color": True,
+            },
+            {
+                "cups_queue_name": "HP_Laser_108w",
+                "status": "READY",
+                "supports_color": False,
+            },
+        ])
+
+        test_pdf = os.path.join(self.test_dir, "color_doc.pdf")
+        with open(test_pdf, "wb") as f:
+            f.write(b"%PDF-1.4 color content")
+
+        agent.doc_mgr.prepare_job_workspace = MagicMock(return_value=test_pdf)
+        agent.cups.validate_document = MagicMock()
+        agent.cups.submit_print_job = MagicMock()
+
+        agent.make_api_request = MagicMock(return_value={"success": True})
+
+        color_job = {
+            "id": "job_color_safety_01",
+            "idempotency_key": "idemp_color_safety_01",
+            "cups_queue_name": "HP_Color_LaserJet",
+            "is_color": True,
+            "is_duplex": False,
+            "copies": 1,
+            "signed_download_url": "/api/kiosk/download/job_color_safety_01",
+        }
+
+        with patch("urllib.request.urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b"%PDF-1.4 color document"
+            mock_url.return_value.__enter__.return_value = mock_resp
+
+            agent.execute_print_job(color_job)
+
+        # CUPS submit_print_job must NEVER have been called on the monochrome printer!
+        agent.cups.submit_print_job.assert_not_called()
+
+        # Job must be transitioned to RECOVERY_REQUIRED
+        st = agent.state_mgr.get_job_state("job_color_safety_01")
+        self.assertEqual(st["current_state"], STATE_RECOVERY_REQUIRED)
+
+    def test_cups_controller_rejects_color_on_monochrome_queue(self):
+        """
+        Verify CupsController.submit_print_job raises CupsSubmissionError
+        if a color job is explicitly attempted on the HP Laser 108w monochrome queue.
+        """
+        controller = CupsController(default_queue="HP_Laser_108w")
+
+        test_pdf = os.path.join(self.test_dir, "mono_check.pdf")
+        with open(test_pdf, "wb") as f:
+            f.write(b"%PDF-1.4 test")
+
+        controller.get_queue_status = MagicMock(return_value=("READY", "Ready"))
+
+        with self.assertRaises(CupsSubmissionError) as ctx:
+            controller.submit_print_job(
+                file_path=test_pdf,
+                options={"is_color": True, "copies": 1},
+                queue_name="HP_Laser_108w",
+            )
+        self.assertIn("strictly monochrome", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

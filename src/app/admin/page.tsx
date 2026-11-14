@@ -43,6 +43,7 @@ import {
 } from 'recharts';
 import { DEFAULT_BRANDING, DEFAULT_PRICING } from '@/lib/constants';
 import { AdminAuthGuard } from '@/components/AdminAuthGuard';
+import MultiPrinterManager from '@/components/admin/MultiPrinterManager';
 import { LogOut, UserCheck } from 'lucide-react';
 import { auth } from '@/lib/firebase';
 
@@ -843,57 +844,16 @@ function AdminDashboardContent({
             </div>
           )}
 
-          {/* TAB 3: PRINTERS */}
+          {/* TAB 3: PRINTERS (MULTI-PRINTER HARDWARE & CUPS MANAGEMENT) */}
           {activeTab === 'printers' && (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 space-y-4">
-              <div>
-                <h3 className="text-base font-bold text-slate-900">HP USB Printers & CUPS Queues</h3>
-                <p className="text-xs text-slate-500">Locally connected printers via USB interface</p>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {(adminData?.printers || []).map((printer: any) => (
-                  <div key={printer.id} className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
-                          <Printer className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-bold text-slate-900">{printer.printer_name}</h4>
-                          <span className="text-[11px] text-slate-500 font-mono">
-                            CUPS Queue: {printer.cups_queue_name}
-                          </span>
-                        </div>
-                      </div>
-                      <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                        {printer.status}
-                      </span>
-                    </div>
-
-                    <div className="text-xs space-y-1 text-slate-600">
-                      <div>Assigned Kiosk: <strong className="text-slate-900">{printer.kiosk_id}</strong></div>
-                      <div>Connection: <strong className="text-slate-900">{printer.connection_type}</strong></div>
-                      <div>Duplex Supported: {printer.supports_duplex ? 'Yes' : 'No'}</div>
-                    </div>
-
-                    <div className="pt-2 border-t border-slate-200 flex items-center justify-between">
-                      <span className="text-[10px] text-slate-400">
-                        Last Print: {new Date(printer.last_test_print || Date.now()).toLocaleTimeString()}
-                      </span>
-                      <button
-                        onClick={() => handleTestPrint(printer)}
-                        disabled={testingPrinterId === printer.id}
-                        className="px-3 py-1 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5"
-                      >
-                        {testingPrinterId === printer.id && <RefreshCw className="w-3 h-3 animate-spin text-blue-400" />}
-                        <span>{testingPrinterId === printer.id ? 'Dispatching...' : 'Print Test Page'}</span>
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <MultiPrinterManager
+              printers={adminData?.printers || []}
+              kiosks={adminData?.kiosks || []}
+              routings={adminData?.routings || []}
+              onRefresh={fetchAdminData}
+              showToast={showToast}
+              getAuthHeaders={getAuthHeaders}
+            />
           )}
 
           {/* TAB 3.5: PRINTER ROUTING */}

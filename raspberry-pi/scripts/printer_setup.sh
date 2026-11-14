@@ -72,10 +72,18 @@ lpoptions -p "$QUEUE_NAME" -o media=A4 -o ColorModel=Gray -o print-color-mode=mo
 lpadmin -d "$QUEUE_NAME"
 echo "[+] '$QUEUE_NAME' configured and set as system default queue."
 
-echo "[5/5] Verifying queue status..."
+echo "[5/5] Verifying queue status and scanning multi-printer devices..."
 lpstat -p "$QUEUE_NAME"
 lpstat -d
 
+echo ""
+echo "--- ALL CONFIGURED CUPS QUEUES ---"
+lpstat -p -d
+
+echo ""
+echo "--- DETECTED HARDWARE & IPP-USB ENDPOINTS ---"
+lpinfo -v 2>/dev/null | grep -i "usb://\|ipp://\|socket://" || echo "No additional raw endpoints found."
+
 echo "=================================================="
-echo "✓ PRINTER SETUP COMPLETED FOR $QUEUE_NAME"
+echo "✓ PRINTER SETUP COMPLETED FOR $QUEUE_NAME (MULTI-PRINTER READY)"
 echo "=================================================="

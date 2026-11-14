@@ -47,6 +47,9 @@ export type PrinterStatus =
   | 'BUSY'
   | 'ERROR'
   | 'PAPER_OUT'
+  | 'TONER_EMPTY'
+  | 'STOPPED'
+  | 'PAUSED'
   | 'OFFLINE'
   | 'UNKNOWN'
   | 'NOT_SUPPORTED';
@@ -188,7 +191,7 @@ export interface Printer {
   manufacturer: string;
   model: string;
   cups_queue_name: string;
-  connection_type: 'USB' | 'IP' | 'NETWORK';
+  connection_type: 'USB' | 'IP' | 'NETWORK' | 'IPP-USB' | 'IPP' | string;
   status: PrinterStatus;
   printer_type: PrinterType;
   enabled: boolean;
@@ -197,10 +200,24 @@ export interface Printer {
   supports_color: boolean;
   supports_duplex: boolean;
   capabilities?: PrinterCapabilities;
+  device_uri?: string;
+  hardware_id?: string;
+  last_detected_at?: string;
+  last_successful_print?: string;
   last_test_print?: string;
   last_error?: string;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface PrinterErrorLog {
+  id: string;
+  printer_id: string;
+  kiosk_id: string;
+  cups_queue_name?: string;
+  error_state: string;
+  error_message?: string;
+  occurred_at: string;
 }
 
 export interface PrinterRouting {
