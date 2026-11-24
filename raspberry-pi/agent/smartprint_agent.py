@@ -74,11 +74,11 @@ def load_config() -> Dict[str, Any]:
         "kiosk_id": DEFAULT_KIOSK_ID,
         "device_token": DEFAULT_DEVICE_TOKEN,
         "organization_id": os.getenv("SMARTPRINT_ORG_ID", ""),
-        "poll_interval_sec": 4,
+        "poll_interval_sec": 1.5,
         "heartbeat_interval_sec": 10,
-        "outbox_interval_sec": 5,
+        "outbox_interval_sec": 2,
         "verify_ssl": True,
-        "cups_queue": os.getenv("SMARTPRINT_CUPS_QUEUE", "HP_Laser_108w"),
+        "cups_queue": os.getenv("SMARTPRINT_CUPS_QUEUE", "PANTUM_M7100DW"),
         "max_pdf_size_mb": 50,
         "job_timeout_seconds": 120,
     }
@@ -599,7 +599,8 @@ class SmartPrintAgent:
             )
 
             with urllib.request.urlopen(dl_req, timeout=30, context=ctx) as resp, open(local_file_path, "wb") as f:
-                f.write(resp.read())
+                content = resp.read()
+                f.write(content)
 
             if hasattr(os, "chmod"):
                 os.chmod(local_file_path, 0o600)
@@ -817,6 +818,41 @@ class SmartPrintAgent:
             )
             self.process_outbox()
 
+    def _wait_for_network_and_initial_heartbeat(self, max_wait_sec: int = 25) -> None:
+        """
+        On boot or service startup, waits for network connection to become available
+        and sends the first heartbeat IMMEDIATELY so kiosk status is online without delay.
+        """
+        logger.info("Checking network connectivity on boot...")
+        start_time = time.time()
+        connected = False
+
+        while (time.time() - start_time) < max_wait_sec and self.running:
+            try:
+                base_url = self.config.get("backend_url", DEFAULT_BACKEND_URL).rstrip("/")
+                health_url = f"{base_url}/api/health"
+                req = urllib.request.Request(
+                    health_url,
+                    headers={"User-Agent": f"GITAM-SmartPrint-Agent/3.0 ({self.config.get('kiosk_id', 'unknown')})"}
+                )
+                ctx = self.get_ssl_context()
+                with urllib.request.urlopen(req, timeout=2.5, context=ctx) as resp:
+                    if resp.status < 500:
+                        connected = True
+                        break
+            except Exception:
+                time.sleep(1.0)
+
+        if connected:
+            logger.info("Network is active. Emitting immediate boot heartbeat...")
+        else:
+            logger.warning(f"Network probe timed out after {max_wait_sec}s. Proceeding with agent startup...")
+
+        try:
+            self.send_heartbeat()
+        except Exception as e:
+            logger.warning(f"Initial boot heartbeat warning: {e}")
+
     # --------------------------------------------------------------------------
     # Main Agent Run Loop
     # --------------------------------------------------------------------------
@@ -834,13 +870,16 @@ class SmartPrintAgent:
             # Run startup crash recovery audit
             self.startup_recovery_check()
 
-            last_heartbeat = 0.0
+            # Fast network readiness check & immediate initial heartbeat
+            self._wait_for_network_and_initial_heartbeat()
+
+            last_heartbeat = time.time()
             last_outbox_check = 0.0
             last_cleanup_check = time.time()
 
             hb_interval = self.config.get("heartbeat_interval_sec", 10)
-            poll_interval = self.config.get("poll_interval_sec", 4)
-            outbox_interval = self.config.get("outbox_interval_sec", 5)
+            poll_interval = self.config.get("poll_interval_sec", 1.5)
+            outbox_interval = self.config.get("outbox_interval_sec", 2)
 
             while self.running:
                 now = time.time()

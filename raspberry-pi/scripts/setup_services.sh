@@ -69,9 +69,9 @@ log "[3/5] Reloading systemd daemon..."
 systemctl daemon-reload
 
 # --- 4. Enable services and timers ---
-log "[4/5] Enabling services..."
-systemctl enable smartprint-agent.service
-log "  Enabled: smartprint-agent.service"
+log "[4/5] Enabling services and boot launcher..."
+bash "$SCRIPT_DIR/enable_autostart.sh"
+log "  Enabled: smartprint-agent.service via launcher"
 
 systemctl enable smartprint-cleanup.service smartprint-cleanup.timer
 systemctl start smartprint-cleanup.timer

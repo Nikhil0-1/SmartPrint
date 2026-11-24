@@ -76,16 +76,14 @@ else
   echo "[+] Existing device configuration found at /etc/smartprint/agent_config.json"
 fi
 
-echo "[7/8] Installing Systemd Services..."
+echo "[7/8] Installing Systemd Services and Permanent Boot Auto-Start..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 
-cp "$PARENT_DIR/systemd/smartprint-agent.service" /etc/systemd/system/smartprint-agent.service
-cp "$PARENT_DIR/systemd/smartprint-kiosk.service" /etc/systemd/system/smartprint-kiosk.service
-
+bash "$SCRIPT_DIR/enable_autostart.sh"
+cp "$PARENT_DIR/systemd/smartprint-kiosk.service" /etc/systemd/system/smartprint-kiosk.service 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable smartprint-agent.service
-systemctl enable smartprint-kiosk.service
+systemctl enable smartprint-kiosk.service 2>/dev/null || true
 
 echo "[8/8] Running Initial Boot Cleanup Routine..."
 bash "$SCRIPT_DIR/cleanup.sh"

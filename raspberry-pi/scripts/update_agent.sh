@@ -31,13 +31,8 @@ mkdir -p "$TARGET_DIR"
 cp -r "${PI_DIR}/agent/"* "$TARGET_DIR/"
 chmod +x "$TARGET_DIR"/*.py
 
-echo "[INFO] Restarting smartprint-agent.service..."
-if systemctl is-active --quiet smartprint-agent.service 2>/dev/null; then
-    systemctl restart smartprint-agent.service
-    echo "[OK] smartprint-agent.service restarted."
-else
-    echo "[INFO] smartprint-agent.service is not currently active."
-fi
+echo "[INFO] Updating launcher and restarting smartprint-agent.service..."
+bash "${SCRIPT_DIR}/enable_autostart.sh"
 
 echo "=========================================================="
 echo "[SUCCESS] SmartPrint Agent updated successfully."

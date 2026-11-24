@@ -1,14 +1,12 @@
 [Unit]
 Description=GITAM SMARTPRINT Raspberry Pi Production Agent Service
-After=network-online.target cups.service ipp-usb.service
-Wants=network-online.target cups.service
+After=network.target cups.service ipp-usb.service
+Wants=cups.service
 Documentation=https://github.com/Nikhil0-1/SmartPrint
 
 [Service]
 Type=simple
-User=smartprint
-Group=smartprint
-SupplementaryGroups=lp lpadmin
+User=root
 WorkingDirectory=/var/lib/smartprint
 
 # Environment configuration
@@ -17,12 +15,12 @@ Environment=SMARTPRINT_CONFIG=/etc/smartprint/agent_config.json
 Environment=SMARTPRINT_STATE_DIR=/var/lib/smartprint
 Environment=SMARTPRINT_CUPS_QUEUE=PANTUM_M7100DW
 
-# Production Python 3 from system with PyCUPS installed
-ExecStart=/usr/bin/python3 /opt/smartprint/raspberry-pi/agent/smartprint_agent.py
+# Launch via universal SmartPrint boot launcher
+ExecStart=/usr/local/bin/smartprint-agent-launcher
 
 # Restart & Lifecycle management
 Restart=always
-RestartSec=5
+RestartSec=3
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=15
