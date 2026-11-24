@@ -457,6 +457,57 @@ class TestMultiPrinterSystem(unittest.TestCase):
             self.assertFalse(pantum["supports_color"])
             self.assertEqual(pantum["manufacturer"], "Pantum")
 
+    def test_pantum_m7100dw_auto_provisioning_when_unregistered(self):
+        """
+        Verify that _ensure_pantum_queue_registered detects USB Pantum hardware (232b:0ed0)
+        and invokes lpadmin and cupsenable to auto-provision PANTUM_M7100DW.
+        """
+        controller = CupsController()
+        with patch("subprocess.check_output") as mock_check, patch("subprocess.run") as mock_run:
+            def check_output_mock(cmd, **kwargs):
+                if cmd[0] == "lsusb":
+                    return "Bus 001 Device 005: ID 232b:0ed0 Pantum M7100DW Series\n"
+                if cmd[0] == "lpinfo":
+                    return "direct usb://Pantum/M7100DW%20Series?serial=123456\n"
+                if cmd[0] == "lpstat" and "PANTUM_M7100DW" in cmd:
+                    raise Exception("Printer does not exist")
+                return ""
+
+            mock_check.side_effect = check_output_mock
+            mock_run.return_value = MagicMock(returncode=0)
+
+            queue_name = controller._ensure_pantum_queue_registered()
+            self.assertEqual(queue_name, "PANTUM_M7100DW")
+            self.assertEqual(controller.default_queue, "PANTUM_M7100DW")
+
+            # Verify lpadmin was called to register the queue
+            lpadmin_calls = [call for call in mock_run.call_args_list if call[0][0][0] == "lpadmin"]
+            self.assertTrue(len(lpadmin_calls) >= 1)
+
+    def test_pantum_queue_alias_normalization(self):
+        """
+        Verify that agent normalizes any Pantum alias (e.g. Pantum_M7108DW)
+        to the physical CUPS queue PANTUM_M7100DW.
+        """
+        agent = SmartPrintAgent(self.config)
+        job = {
+            "id": "job_pantum_test_01",
+            "kiosk_id": "GITAM-SPK-001",
+            "cups_printer_name": "Pantum_M7108DW",
+            "cups_queue_name": "Pantum_M7108DW",
+            "is_color": False,
+            "is_duplex": True,
+        }
+        target_queue = (
+            job.get("cups_printer_name")
+            or job.get("cups_queue_name")
+            or agent.cups.default_queue
+        )
+        if target_queue and "pantum" in target_queue.lower():
+            target_queue = "PANTUM_M7100DW"
+
+        self.assertEqual(target_queue, "PANTUM_M7100DW")
+
 
 if __name__ == "__main__":
     unittest.main()

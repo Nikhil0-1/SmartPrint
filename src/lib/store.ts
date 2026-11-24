@@ -616,23 +616,47 @@ class StateManager {
   upsertDiscoveredPrinters(kioskId: string, discovered: Array<Record<string, any>>): Printer[] {
     const existing = this.getPrinters(undefined, kioskId);
     const now = new Date().toISOString();
+    const matchedIds = new Set<string>();
 
     for (const d of discovered) {
       const queue = d.cups_queue_name || d.queue_name;
       const deviceUri = d.device_uri || d.uri;
       const hwId = d.hardware_id;
 
-      const match = existing.find(
-        (p) =>
-          (hwId && p.hardware_id === hwId) ||
-          (queue && p.cups_queue_name.toLowerCase() === queue.toLowerCase()) ||
-          (deviceUri && p.device_uri && p.device_uri.toLowerCase() === deviceUri.toLowerCase())
-      );
+      const match = existing.find((p) => {
+        if (hwId && p.hardware_id === hwId) return true;
+        if (queue && p.cups_queue_name.toLowerCase() === queue.toLowerCase()) return true;
+        if (deviceUri && p.device_uri && p.device_uri.toLowerCase() === deviceUri.toLowerCase()) return true;
+
+        // Broad match Pantum series
+        const isItemPantum = (d.manufacturer || '').toLowerCase().includes('pantum') ||
+                             (queue || '').toLowerCase().includes('pantum') ||
+                             (d.model || '').toLowerCase().includes('pantum') ||
+                             (d.model || '').toLowerCase().includes('m710');
+        const isPrinterPantum = (p.manufacturer || '').toLowerCase().includes('pantum') ||
+                                (p.cups_queue_name || '').toLowerCase().includes('pantum') ||
+                                (p.model || '').toLowerCase().includes('pantum') ||
+                                (p.model || '').toLowerCase().includes('m710') ||
+                                p.id === '44444444-4444-4444-4444-444444444444';
+        if (isItemPantum && isPrinterPantum) return true;
+
+        // Broad match HP Laser 108w
+        const isItem108 = (d.model || '').toLowerCase().includes('108') || (queue || '').toLowerCase().includes('108');
+        const isPrinter108 = (p.model || '').toLowerCase().includes('108') || (p.cups_queue_name || '').toLowerCase().includes('108');
+        if (isItem108 && isPrinter108) return true;
+
+        return false;
+      });
 
       const status = (d.status || 'READY') as any;
       const lastError = d.last_error || d.error_message || undefined;
 
       if (match) {
+        matchedIds.add(match.id);
+        const isPantum = (match.manufacturer || '').toLowerCase().includes('pantum') ||
+                         (match.cups_queue_name || '').toLowerCase().includes('pantum') ||
+                         match.id === '44444444-4444-4444-4444-444444444444';
+
         this.updatePrinter(match.id, {
           status,
           last_detected_at: now,
@@ -643,7 +667,17 @@ class StateManager {
           model: d.model || match.model,
           manufacturer: d.manufacturer || match.manufacturer,
           capabilities: d.capabilities || match.capabilities,
+          cups_queue_name: queue || match.cups_queue_name,
+          is_default: isPantum || d.is_default !== undefined ? Boolean(d.is_default) : match.is_default,
         });
+
+        if (isPantum && status === 'READY') {
+          const r = this.routings.get(kioskId);
+          if (r) {
+            r.bw_primary_printer_id = match.id;
+            this.routings.set(kioskId, r);
+          }
+        }
       } else if (existing.length < 10) {
         const id = `printer_${kioskId}_${queue || Date.now()}`;
         const newPrinter: Printer = {
@@ -676,7 +710,18 @@ class StateManager {
           updated_at: now,
         };
         this.printers.set(id, newPrinter);
+        matchedIds.add(id);
         existing.push(newPrinter);
+      }
+    }
+
+    // Reconcile unconfirmed printers to OFFLINE
+    for (const p of existing) {
+      if (!matchedIds.has(p.id)) {
+        this.updatePrinter(p.id, {
+          status: 'OFFLINE',
+          last_error: 'Printer not detected on USB or network',
+        });
       }
     }
 

@@ -14,9 +14,23 @@ export async function POST(request: Request) {
         ram_usage: 35.2 + Math.round((Math.random() * 4 - 2) * 10) / 10,
         disk_usage: 18.9,
         printer_status: 'READY',
-        printer_message: 'HP LaserJet USB Queue Ready',
+        printer_message: 'Pantum M7100DW Duplex Laser Ready',
         agent_version: '1.0.0',
       });
+      store.upsertDiscoveredPrinters(targetKioskId, [
+        {
+          hardware_id: 'pantum_m7100dw_usb',
+          printer_name: 'Pantum Multi-Function Printer (M7108DW)',
+          display_name: 'Pantum Multi-Function Printer (M7108DW)',
+          manufacturer: 'Pantum',
+          model: 'Pantum M7100 Series (USB)',
+          cups_queue_name: 'PANTUM_M7100DW',
+          status: 'READY',
+          supports_color: false,
+          supports_duplex: true,
+          is_default: true,
+        },
+      ]);
       return NextResponse.json({ success: true, message: `Simulated heartbeat recorded for ${targetKioskId}` });
     }
 

@@ -531,6 +531,9 @@ class SmartPrintAgent:
             or job.get("cups_queue_name")
             or self.cups.default_queue
         )
+        # Normalize Pantum queue aliases (e.g. Pantum_M7108DW -> PANTUM_M7100DW)
+        if target_queue and "pantum" in target_queue.lower():
+            target_queue = "PANTUM_M7100DW"
 
         logger.info(f"========== STARTING DURABLE PRINT LIFECYCLE: JOB {job_id} ==========")
 

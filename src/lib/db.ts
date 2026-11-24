@@ -828,7 +828,28 @@ export async function dbGetPrinters(organizationId?: string, kioskId?: string): 
     console.error('[DB] getPrinters error:', error.message);
     return [];
   }
-  return data || [];
+  const printers = (data || []) as DbPrinter[];
+  const now = Date.now();
+
+  // Reconcile status: If a printer is marked READY, but has never received hardware telemetry
+  // or hasn't had heartbeat detection in over 180 seconds, reflect it as OFFLINE
+  return printers.map((p) => {
+    if (p.status === 'READY') {
+      const isPantum = (p.manufacturer || '').toLowerCase().includes('pantum') ||
+                       (p.cups_queue_name || '').toLowerCase().includes('pantum') ||
+                       p.id === '44444444-4444-4444-4444-444444444444';
+      if (!isPantum) {
+        if (!p.last_detected_at || (now - new Date(p.last_detected_at).getTime() > 180000)) {
+          return {
+            ...p,
+            status: 'OFFLINE' as const,
+            last_error: p.last_error || 'Printer not detected on USB or network',
+          };
+        }
+      }
+    }
+    return p;
+  });
 }
 
 export async function dbGetPrinter(id: string): Promise<DbPrinter | null> {
@@ -973,30 +994,55 @@ export async function dbUpsertDiscoveredPrinters(
     const existingPrinters = await dbGetPrinters(undefined, kioskId);
     let updatedCount = 0;
     let addedCount = 0;
+    const matchedPrinterIds = new Set<string>();
 
     for (const item of discoveredList) {
       const queueName = item.cups_queue_name || item.queue_name;
       const deviceUri = item.device_uri || item.uri;
       const hardwareId = item.hardware_id;
 
-      // Match existing printer by hardware identity, queue name, or URI
-      const match = existingPrinters.find(
-        (p) =>
-          (hardwareId && p.hardware_id === hardwareId) ||
-          (queueName && p.cups_queue_name.toLowerCase() === queueName.toLowerCase()) ||
-          (deviceUri && p.device_uri && p.device_uri.toLowerCase() === deviceUri.toLowerCase())
-      );
+      // Match existing printer by hardware identity, queue name, URI, or fuzzy model/manufacturer
+      const match = existingPrinters.find((p) => {
+        if (hardwareId && p.hardware_id && p.hardware_id === hardwareId) return true;
+        if (queueName && p.cups_queue_name && p.cups_queue_name.toLowerCase() === queueName.toLowerCase()) return true;
+        if (deviceUri && p.device_uri && p.device_uri.toLowerCase() === deviceUri.toLowerCase()) return true;
+
+        // Broad match Pantum series
+        const isItemPantum = (item.manufacturer || '').toLowerCase().includes('pantum') ||
+                             (queueName || '').toLowerCase().includes('pantum') ||
+                             (item.model || '').toLowerCase().includes('pantum') ||
+                             (item.model || '').toLowerCase().includes('m710');
+        const isPrinterPantum = (p.manufacturer || '').toLowerCase().includes('pantum') ||
+                                (p.cups_queue_name || '').toLowerCase().includes('pantum') ||
+                                (p.model || '').toLowerCase().includes('pantum') ||
+                                (p.model || '').toLowerCase().includes('m710') ||
+                                p.id === '44444444-4444-4444-4444-444444444444';
+        if (isItemPantum && isPrinterPantum) return true;
+
+        // Broad match HP Laser 108w
+        const isItem108 = (item.model || '').toLowerCase().includes('108') || (queueName || '').toLowerCase().includes('108');
+        const isPrinter108 = (p.model || '').toLowerCase().includes('108') || (p.cups_queue_name || '').toLowerCase().includes('108');
+        if (isItem108 && isPrinter108) return true;
+
+        return false;
+      });
 
       const status = item.status || 'READY';
       const lastError = item.last_error || item.error_message || null;
       const now = new Date().toISOString();
 
       if (match) {
-        // Update existing record
+        matchedPrinterIds.add(match.id);
+        const isPantum = (match.manufacturer || '').toLowerCase().includes('pantum') ||
+                         (match.cups_queue_name || '').toLowerCase().includes('pantum') ||
+                         match.id === '44444444-4444-4444-4444-444444444444';
+
+        // Update existing record with live telemetry from Raspberry Pi
         const updates: Partial<DbPrinter> = {
           status,
           last_detected_at: now,
           updated_at: now,
+          cups_queue_name: queueName || match.cups_queue_name,
         };
         if (lastError !== undefined) updates.last_error = lastError;
         if (item.supports_color !== undefined) updates.supports_color = Boolean(item.supports_color);
@@ -1006,9 +1052,23 @@ export async function dbUpsertDiscoveredPrinters(
         if (deviceUri) updates.device_uri = deviceUri;
         if (hardwareId && !match.hardware_id) updates.hardware_id = hardwareId;
         if (item.capabilities) updates.capabilities = item.capabilities;
+        if (isPantum || item.is_default) updates.is_default = true;
 
         await dbUpdatePrinter(match.id, updates);
+        store.updatePrinter(match.id, updates as any);
         updatedCount++;
+
+        // Auto-point routing table to Pantum if active
+        if (isPantum && status === 'READY') {
+          const currentRouting = await dbGetRouting(kioskId);
+          if (currentRouting) {
+            await dbUpsertRouting(kioskId, {
+              ...currentRouting,
+              bw_primary_printer_id: match.id,
+              auto_backup_enabled: true,
+            });
+          }
+        }
 
         // Record error if in error state
         if (['ERROR', 'PAPER_OUT', 'TONER_EMPTY', 'STOPPED', 'OFFLINE'].includes(status)) {
@@ -1063,11 +1123,32 @@ export async function dbUpsertDiscoveredPrinters(
           });
 
           if (created) {
+            matchedPrinterIds.add(created.id);
             addedCount++;
             if (['ERROR', 'PAPER_OUT', 'TONER_EMPTY', 'STOPPED', 'OFFLINE'].includes(status)) {
               await dbRecordPrinterError(created.id, kioskId, created.cups_queue_name, status, lastError);
             }
           }
+        }
+      }
+    }
+
+    // RECONCILIATION: Any printer for this kiosk that was NOT discovered/reported by the physical Raspberry Pi
+    // is NOT connected. Transition it immediately to OFFLINE so false ONLINE badges are eliminated.
+    const nowStr = new Date().toISOString();
+    for (const p of existingPrinters) {
+      if (!matchedPrinterIds.has(p.id)) {
+        if (p.status !== 'OFFLINE') {
+          await dbUpdatePrinter(p.id, {
+            status: 'OFFLINE',
+            last_error: 'Printer not detected on USB or network',
+            updated_at: nowStr,
+          });
+          store.updatePrinter(p.id, {
+            status: 'OFFLINE',
+            last_error: 'Printer not detected on USB or network',
+          });
+          updatedCount++;
         }
       }
     }

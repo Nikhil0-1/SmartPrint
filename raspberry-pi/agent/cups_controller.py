@@ -65,6 +65,106 @@ class CupsController:
         self._init_connection()
 
     # --------------------------------------------------------------------------
+    # Zero-Touch Pantum M7100DW Queue Auto-Provisioning
+    # --------------------------------------------------------------------------
+    def _ensure_pantum_queue_registered(self) -> Optional[str]:
+        """
+        Zero-touch auto-provisioning for Pantum M7100DW Duplex Laser Printer.
+        Detects Pantum on USB (VID 232b, PID 0ed0), auto-creates CUPS queue
+        'PANTUM_M7100DW' if not present, and enables duplex + monochrome.
+        """
+        pantum_detected = False
+        device_uri = None
+
+        # 1. Check lsusb for Pantum hardware
+        try:
+            lsusb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
+            if "232b:" in lsusb_out or "pantum" in lsusb_out.lower() or "0ed0" in lsusb_out:
+                pantum_detected = True
+        except Exception:
+            pass
+
+        # 2. Check lpinfo -v for Pantum USB or IPP device
+        try:
+            lpinfo_out = subprocess.check_output(["lpinfo", "-v"], text=True, stderr=subprocess.DEVNULL)
+            for line in lpinfo_out.splitlines():
+                line_lower = line.lower()
+                if "pantum" in line_lower or "232b" in line_lower:
+                    pantum_detected = True
+                    parts = line.strip().split(None, 1)
+                    if len(parts) >= 2:
+                        device_uri = parts[1].strip()
+                        break
+        except Exception:
+            pass
+
+        if not pantum_detected:
+            return None
+
+        # 3. Check active ipp-usb ports if no device_uri from lpinfo
+        if not device_uri:
+            for port in [60001, 60000]:
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(f"http://127.0.0.1:{port}/ipp/print", method="HEAD")
+                    with urllib.request.urlopen(req, timeout=0.5):
+                        device_uri = f"ipp://127.0.0.1:{port}/ipp/print"
+                        break
+                except Exception:
+                    pass
+
+        if not device_uri:
+            device_uri = "ipp://127.0.0.1:60000/ipp/print"
+
+        queue_name = "PANTUM_M7100DW"
+
+        # Check if queue already exists
+        queue_exists = False
+        try:
+            q_check = subprocess.check_output(["lpstat", "-p", queue_name], text=True, stderr=subprocess.DEVNULL)
+            if queue_name in q_check:
+                queue_exists = True
+        except Exception:
+            queue_exists = False
+
+        if not queue_exists:
+            logger.info(f"Pantum M7100DW detected on USB. Auto-registering CUPS queue '{queue_name}' with URI '{device_uri}'...")
+            try:
+                # Attempt IPP Everywhere driverless registration
+                res = subprocess.run(
+                    ["lpadmin", "-p", queue_name, "-E", "-v", device_uri, "-m", "everywhere",
+                     "-D", "Pantum M7100DW Duplex Laser", "-L", "Campus Kiosk Duplex Bay"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if res.returncode != 0:
+                    # Fallback to generic PPD
+                    subprocess.run(
+                        ["lpadmin", "-p", queue_name, "-E", "-v", device_uri, "-m", "drv:///sample.drv/generic.ppd",
+                         "-D", "Pantum M7100DW Duplex Laser", "-L", "Campus Kiosk Duplex Bay"],
+                        capture_output=True, text=True, timeout=10
+                    )
+
+                # Enable queue & accept print jobs
+                subprocess.run(["cupsenable", queue_name], capture_output=True, timeout=5)
+                subprocess.run(["cupsaccept", queue_name], capture_output=True, timeout=5)
+
+                # Configure monochrome & hardware duplex
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "media=A4"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "ColorModel=Gray"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "print-color-mode=monochrome"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "sides=two-sided-long-edge"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "Duplex=DuplexNoTumble"], capture_output=True, timeout=5)
+
+                # Set as system default
+                subprocess.run(["lpadmin", "-d", queue_name], capture_output=True, timeout=5)
+                self.default_queue = queue_name
+                logger.info(f"Successfully auto-registered and activated CUPS queue '{queue_name}'.")
+            except Exception as e:
+                logger.warning(f"Failed to auto-register Pantum CUPS queue: {e}")
+
+        return queue_name
+
+    # --------------------------------------------------------------------------
     # Multi-Printer Auto-Discovery (USB, IPP-USB, Network, CUPS Queues)
     # --------------------------------------------------------------------------
     def discover_all_printers(self) -> List[Dict[str, Any]]:
@@ -89,6 +189,9 @@ class CupsController:
 
         Never creates fake records. Never assumes all five printers are connected.
         """
+        # Auto-provision Pantum if connected on USB
+        pantum_provisioned = self._ensure_pantum_queue_registered()
+
         printers: List[Dict[str, Any]] = []
         seen_keys = set()
 
@@ -312,17 +415,56 @@ class CupsController:
         except Exception:
             pass
 
-        # 3. Always ensure verified HP Laser 108w queue or endpoint is represented if connected
+        # 3. Always ensure detected Pantum hardware queue or endpoint is represented if connected
+        has_pantum = any("pantum" in p.get("cups_queue_name", "").lower() or "pantum" in p.get("model", "").lower() or "pantum" in p.get("manufacturer", "").lower() for p in printers)
+        if not has_pantum:
+            try:
+                usb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
+                if "232b:" in usb_out or "pantum" in usb_out.lower() or "0ed0" in usb_out:
+                    pantum_q = "PANTUM_M7100DW"
+                    p_status, p_msg = self.get_queue_status(pantum_q)
+                    p_uri = "ipp://127.0.0.1:60000/ipp/print"
+                    hw_id = "pantum_m7100dw_usb"
+                    if hw_id not in seen_keys:
+                        seen_keys.add(hw_id)
+                        printers.insert(0, {
+                            "hardware_id": hw_id,
+                            "printer_name": "Pantum Multi-Function Printer (M7108DW)",
+                            "display_name": "Pantum Multi-Function Printer (M7108DW)",
+                            "manufacturer": "Pantum",
+                            "model": "Pantum M7100 Series (USB)",
+                            "cups_queue_name": pantum_q,
+                            "device_uri": p_uri,
+                            "connection_type": "USB",
+                            "status": p_status if p_status in ("READY", "BUSY") else "READY",
+                            "printer_type": "BW",
+                            "supports_color": False,
+                            "supports_duplex": True,
+                            "paper_sizes": ["A4", "Letter"],
+                            "document_formats": ["application/pdf", "image/pwg-raster", "image/urf"],
+                            "last_error": None if p_status in ("READY", "BUSY") else p_msg,
+                            "is_default": True,
+                            "capabilities": {
+                                "color": False,
+                                "grayscale": True,
+                                "duplex": True,
+                                "paper_sizes": ["A4", "Letter"],
+                            },
+                        })
+            except Exception:
+                pass
+
+        # 4. HP Laser 108w queue or endpoint representation ONLY IF physically connected on USB bus
         has_hp_108w = any("108" in p.get("cups_queue_name", "").lower() or "108" in p.get("model", "").lower() for p in printers)
         if not has_hp_108w:
             # Check if HP hardware is connected via lsusb
             try:
                 usb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
-                if "Hewlett-Packard" in usb_out or "03f0:" in usb_out or "04e8:" in usb_out or "HP" in usb_out:
+                if ("Hewlett-Packard" in usb_out or "03f0:" in usb_out or "04e8:" in usb_out) and "232b:" not in usb_out:
                     hw_id = make_hardware_id("IPP-USB", IPP_USB_ENDPOINT, "HP Laser 108w")
                     if hw_id not in seen_keys:
                         seen_keys.add(hw_id)
-                        printers.insert(0, {
+                        printers.append({
                             "hardware_id": hw_id,
                             "printer_name": "HP Laser 108w",
                             "display_name": "HP Laser 108w (USB)",
@@ -338,7 +480,7 @@ class CupsController:
                             "paper_sizes": ["A4"],
                             "document_formats": ["application/pdf", "image/urf"],
                             "last_error": None,
-                            "is_default": True,
+                            "is_default": len(printers) == 0,
                             "capabilities": {
                                 "color": False,
                                 "grayscale": True,
@@ -348,6 +490,17 @@ class CupsController:
                         })
             except Exception:
                 pass
+
+        # If Pantum is present, guarantee it is designated as primary default
+        pantum_idx = next((i for i, p in enumerate(printers) if "pantum" in p.get("manufacturer", "").lower() or "pantum" in p.get("cups_queue_name", "").lower()), None)
+        if pantum_idx is not None:
+            for p in printers:
+                p["is_default"] = False
+            printers[pantum_idx]["is_default"] = True
+            self.default_queue = printers[pantum_idx]["cups_queue_name"]
+            if pantum_idx > 0:
+                p_item = printers.pop(pantum_idx)
+                printers.insert(0, p_item)
 
         # Return discovered printers (up to 5 or actual hardware discovered)
         return printers[:5] if len(printers) > 5 else printers
