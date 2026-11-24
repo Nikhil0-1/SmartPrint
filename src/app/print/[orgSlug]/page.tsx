@@ -1,7 +1,7 @@
 'use client';
 
 import React, { use } from 'react';
-import CustomerPrintPage from '../page';
+import CustomerPrintApp from '@/components/print/CustomerPrintApp';
 
 export default function OrgSpecificPrintPage({
   params,
@@ -9,5 +9,5 @@ export default function OrgSpecificPrintPage({
   params: Promise<{ orgSlug: string }>;
 }) {
   const resolved = use(params);
-  return <CustomerPrintPage orgSlug={resolved.orgSlug} />;
+  return <CustomerPrintApp orgSlug={resolved.orgSlug} />;
 }

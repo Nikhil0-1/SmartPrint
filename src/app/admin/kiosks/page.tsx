@@ -1,7 +1,7 @@
 'use client';
 
-import AdminPanelPage from '../page';
+import AdminDashboard from '@/components/admin/AdminDashboard';
 
 export default function KiosksAdminPage() {
-  return <AdminPanelPage initialTab="kiosks" />;
+  return <AdminDashboard initialTab="kiosks" />;
 }

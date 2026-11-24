@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/auth';
-import { GITAM_ORG_ID } from '@/lib/store';
+import { GITAM_ORG_ID, store } from '@/lib/store';
 import {
   dbGetOrganizations,
   dbGetOrganizationBySlug,
@@ -72,7 +72,9 @@ export async function GET(request: Request) {
     const kiosks = await dbGetKiosks(effectiveOrgId);
     const printers = await dbGetPrinters(effectiveOrgId);
     const branding = effectiveOrgId ? await dbGetBranding(effectiveOrgId) : null;
-    const pricing = effectiveOrgId ? await dbGetPricing(effectiveOrgId) : null;
+    const pricing = effectiveOrgId
+      ? ((await dbGetPricing(effectiveOrgId)) || store.getPricing(effectiveOrgId))
+      : null;
     const paymentConfig = effectiveOrgId ? await dbGetPaymentConfig(effectiveOrgId) : null;
     const members = effectiveOrgId ? await dbGetMembersByOrg(effectiveOrgId) : [];
     const locations = await dbGetLocations(effectiveOrgId);

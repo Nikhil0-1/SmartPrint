@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     const claimedJob = await dbClaimNextPrintJob(kioskId, workerId, 90);
 
     if (claimedJob) {
-      let cupsQueueName = 'Pantum_M7108DW';
+      let cupsQueueName = 'PANTUM_M7100DW';
       if (claimedJob.printer_id) {
         const printer = await dbGetPrinter(claimedJob.printer_id);
         if (printer) {

@@ -32,6 +32,68 @@ from cups_controller import CupsController, DEFAULT_QUEUE_NAME
 from smartprint_agent import load_config, get_system_telemetry, get_hardware_model, get_local_ip
 
 
+def check_power_undervoltage() -> tuple:
+    """
+    Checks Raspberry Pi power input status using vcgencmd get_throttled.
+    Returns (status, details) where status is 'PASS', 'WARN', or 'FAIL'.
+    Bit 0 (0x1): Active under-voltage currently detected (<4.63V)
+    Bit 1 (0x2): Arm frequency currently capped
+    Bit 2 (0x4): Currently throttled
+    Bit 16 (0x10000): Under-voltage has occurred since boot
+    Bit 18 (0x40000): Throttling has occurred since boot
+    """
+    try:
+        res = subprocess.check_output(
+            ["vcgencmd", "get_throttled"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0
+        ).strip()
+        if "=" in res:
+            hex_str = res.split("=")[1].strip()
+            val = int(hex_str, 16)
+            if val == 0:
+                return "PASS", "Power supply stable (5.1V nominal, throttled=0x0)"
+
+            issues = []
+            status = "WARN"
+            if val & 0x1:
+                status = "FAIL"
+                issues.append("ACTIVE UNDER-VOLTAGE (< 4.63V)")
+            elif val & 0x10000:
+                issues.append("Under-voltage occurred since boot")
+
+            if val & 0x2:
+                status = "FAIL"
+                issues.append("ARM frequency actively capped")
+            if val & 0x4:
+                status = "FAIL"
+                issues.append("Actively throttled")
+            if val & 0x40000:
+                issues.append("Throttling occurred since boot")
+
+            msg = f"Code {hex_str}: {', '.join(issues)}. Recommend official 5.1V 3A USB-C PSU."
+            return status, msg
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        dmesg = subprocess.check_output(
+            ["dmesg"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0
+        )
+        if "Under-voltage detected" in dmesg:
+            return "WARN", "Under-voltage logged in dmesg. Check power adapter and USB-C cable."
+    except Exception:
+        pass
+
+    return "PASS", "Power voltage nominal (no throttling or undervoltage detected)"
+
+
 def run_diagnostics(as_json: bool = False) -> Dict[str, Any]:
     """Runs all non-destructive diagnostics and returns structured report."""
     report: Dict[str, Any] = {
@@ -134,7 +196,7 @@ def run_diagnostics(as_json: bool = False) -> Dict[str, Any]:
     except Exception as e:
         record_check("disk_space", "WARN", f"Could not determine disk usage: {e}")
 
-    # 7. CPU Temperature
+    # 7. CPU Temperature & Power Supply Health
     if cpu_temp is not None:
         if cpu_temp < 75.0:
             record_check("cpu_temperature", "PASS", f"{cpu_temp}°C (within normal operating range)")
@@ -144,6 +206,10 @@ def run_diagnostics(as_json: bool = False) -> Dict[str, Any]:
             record_check("cpu_temperature", "FAIL", f"{cpu_temp}°C (thermal throttling risk)")
     else:
         record_check("cpu_temperature", "WARN", "Thermal sensor unavailable")
+
+    # 7.5 Power Supply & Undervoltage Health
+    power_status, power_details = check_power_undervoltage()
+    record_check("power_voltage_health", power_status, power_details)
 
     # 8. Agent Process Lock / Daemon Status
     lock_file = state_mgr.lock_file_path

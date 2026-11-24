@@ -31,6 +31,7 @@ from state_manager import (
 )
 from smartprint_agent import SmartPrintAgent
 from document_manager import DocumentManager
+from diagnostics import check_power_undervoltage
 
 
 class TestMultiPrinterSystem(unittest.TestCase):
@@ -396,6 +397,65 @@ class TestMultiPrinterSystem(unittest.TestCase):
                 queue_name="HP_Laser_108w",
             )
         self.assertIn("strictly monochrome", str(ctx.exception))
+
+    @patch("subprocess.check_output")
+    def test_diagnostics_undervoltage_detection(self, mock_subp):
+        """
+        Verify that check_power_undervoltage accurately detects:
+        - 0x0 nominal power (PASS)
+        - Active under-voltage bit 0 (FAIL)
+        - Historical under-voltage bit 16 (WARN)
+        """
+        # 1. Nominal power
+        mock_subp.return_value = "throttled=0x0\n"
+        status, details = check_power_undervoltage()
+        self.assertEqual(status, "PASS")
+        self.assertIn("nominal", details.lower())
+
+        # 2. Active under-voltage (< 4.63V)
+        mock_subp.return_value = "throttled=0x50005\n"
+        status, details = check_power_undervoltage()
+        self.assertEqual(status, "FAIL")
+        self.assertIn("ACTIVE UNDER-VOLTAGE", details)
+
+        # 3. Under-voltage occurred since boot
+        mock_subp.return_value = "throttled=0x50000\n"
+        status, details = check_power_undervoltage()
+        self.assertEqual(status, "WARN")
+        self.assertIn("Under-voltage occurred since boot", details)
+
+    def test_pantum_m7100dw_discovery_and_duplex_capabilities(self):
+        """
+        Verify that Pantum M7100DW is discovered with duplex capability enabled
+        and proper hardware model attribution.
+        """
+        controller = CupsController(default_queue="PANTUM_M7100DW")
+
+        lpstat_v_output = (
+            "device for PANTUM_M7100DW: ipp://127.0.0.1:60000/ipp/print\n"
+            "device for HP_Laser_108w: ipp://127.0.0.1:60001/ipp/print\n"
+        )
+        with patch("subprocess.check_output") as mock_subp:
+            def side_effect(cmd, **kwargs):
+                if cmd[0] == "lpstat" and "-v" in cmd:
+                    return lpstat_v_output
+                elif cmd[0] == "lpstat" and "-d" in cmd:
+                    return "system default destination: PANTUM_M7100DW\n"
+                elif cmd[0] == "lpoptions":
+                    return "PageSize/Media Size: *A4 Letter\nDuplex/2-Sided: None *DuplexNoTumble\nColorModel/Color: *Gray\n"
+                elif cmd[0] == "lsusb":
+                    return "Bus 001 Device 004: ID 232b:0ed0 Pantum M7100DW Series\n"
+                return ""
+
+            mock_subp.side_effect = side_effect
+            printers = controller.discover_all_printers()
+
+            self.assertEqual(len(printers), 2)
+            pantum = next((p for p in printers if p["cups_queue_name"] == "PANTUM_M7100DW"), None)
+            self.assertIsNotNone(pantum)
+            self.assertTrue(pantum["supports_duplex"])
+            self.assertFalse(pantum["supports_color"])
+            self.assertEqual(pantum["manufacturer"], "Pantum")
 
 
 if __name__ == "__main__":

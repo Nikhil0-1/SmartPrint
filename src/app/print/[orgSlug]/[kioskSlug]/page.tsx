@@ -1,7 +1,7 @@
 'use client';
 
 import React, { use } from 'react';
-import CustomerPrintPage from '../../page';
+import CustomerPrintApp from '@/components/print/CustomerPrintApp';
 
 export default function KioskSpecificPrintPage({
   params,
@@ -10,7 +10,7 @@ export default function KioskSpecificPrintPage({
 }) {
   const resolved = use(params);
   return (
-    <CustomerPrintPage
+    <CustomerPrintApp
       orgSlug={resolved.orgSlug}
       kioskSlug={resolved.kioskSlug}
     />

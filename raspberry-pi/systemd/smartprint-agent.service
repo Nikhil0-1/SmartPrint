@@ -15,7 +15,7 @@ WorkingDirectory=/var/lib/smartprint
 Environment=PYTHONUNBUFFERED=1
 Environment=SMARTPRINT_CONFIG=/etc/smartprint/agent_config.json
 Environment=SMARTPRINT_STATE_DIR=/var/lib/smartprint
-Environment=SMARTPRINT_CUPS_QUEUE=HP_Laser_108w
+Environment=SMARTPRINT_CUPS_QUEUE=PANTUM_M7100DW
 
 # Production Python 3 from system with PyCUPS installed
 ExecStart=/usr/bin/python3 /opt/smartprint/raspberry-pi/agent/smartprint_agent.py

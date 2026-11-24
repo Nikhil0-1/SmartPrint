@@ -1,7 +1,7 @@
 'use client';
 
-import AdminPanelPage from '../page';
+import AdminDashboard from '@/components/admin/AdminDashboard';
 
-export default function OrgAdminRoute() {
-  return <AdminPanelPage initialTab="branding" />;
+export default function OrganizationAdminPage() {
+  return <AdminDashboard initialTab="branding" />;
 }

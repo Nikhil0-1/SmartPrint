@@ -1,7 +1,7 @@
 'use client';
 
-import AdminPanelPage from '../page';
+import AdminDashboard from '@/components/admin/AdminDashboard';
 
 export default function PricingAdminPage() {
-  return <AdminPanelPage initialTab="pricing" />;
+  return <AdminDashboard initialTab="pricing" />;
 }

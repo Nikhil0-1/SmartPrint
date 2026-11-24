@@ -186,8 +186,11 @@ class CupsController:
             try:
                 lp_opts = subprocess.check_output(["lpoptions", "-p", q_name, "-l"], text=True, stderr=subprocess.DEVNULL)
                 lp_opts_lower = lp_opts.lower()
-                if "colormodel" in lp_opts_lower and any(c in lp_opts_lower for c in ["rgb", "cmyk", "color"]):
-                    supports_color = True
+                for line in lp_opts.splitlines():
+                    if line.lower().startswith("colormodel/"):
+                        val_part = line.split(":", 1)[1].lower() if ":" in line else ""
+                        if any(c in val_part for c in ["rgb", "cmyk", "*color"]):
+                            supports_color = True
                 if "duplex" in lp_opts_lower and "duplexnotumble" in lp_opts_lower:
                     supports_duplex = True
                 if "pagesize" in lp_opts_lower:
@@ -205,6 +208,11 @@ class CupsController:
             if "108" in q_name or "108" in raw_model:
                 supports_color = False
                 supports_duplex = False
+
+            # Pantum M7100DW series is strictly monochrome with hardware automatic duplex
+            if any(k in q_name.lower() or k in raw_model.lower() for k in ["m7100", "m7108", "pantum"]):
+                supports_color = False
+                supports_duplex = True
 
             # Query real-time status
             q_status, q_msg = self.get_queue_status(q_name)

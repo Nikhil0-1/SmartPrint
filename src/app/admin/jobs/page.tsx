@@ -1,7 +1,7 @@
 'use client';
 
-import AdminPanelPage from '../page';
+import AdminDashboard from '@/components/admin/AdminDashboard';
 
 export default function JobsAdminPage() {
-  return <AdminPanelPage initialTab="jobs" />;
+  return <AdminDashboard initialTab="jobs" />;
 }
