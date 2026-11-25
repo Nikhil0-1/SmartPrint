@@ -55,9 +55,12 @@ export async function GET(
       ? String((job as unknown as Record<string, unknown>).original_filename)
       : 'document.pdf';
 
-    // Fallback: If stored bytes are raw image (PNG / JPEG), convert dynamically to A4 PDF
+    // Fallback: If stored bytes are raw PNG / JPEG, convert dynamically to A4 PDF.
+    // For other formats (Office docs, WebP, BMP, TXT), serve with original extension so Pi converts via LibreOffice/Pillow.
     let mimeType = 'application/pdf';
+    let downloadExt = 'pdf';
     if (docBuffer.length > 4) {
+      const isPdf = docBuffer.subarray(0, 5).toString('ascii') === '%PDF-';
       const isPng = docBuffer[0] === 0x89 && docBuffer[1] === 0x50 && docBuffer[2] === 0x4e;
       const isJpg = docBuffer[0] === 0xff && docBuffer[1] === 0xd8;
       if (isPng || isJpg) {
@@ -67,6 +70,13 @@ export async function GET(
         } catch (convErr) {
           console.warn('[DOWNLOAD] Runtime image-to-PDF conversion warning:', convErr);
           mimeType = isPng ? 'image/png' : 'image/jpeg';
+          downloadExt = isPng ? 'png' : 'jpg';
+        }
+      } else if (!isPdf) {
+        mimeType = 'application/octet-stream';
+        const extMatch = filename.match(/\.([a-zA-Z0-9]+)$/);
+        if (extMatch) {
+          downloadExt = extMatch[1].toLowerCase();
         }
       }
     }
@@ -75,7 +85,7 @@ export async function GET(
       status: 200,
       headers: {
         'Content-Type': mimeType,
-        'Content-Disposition': `attachment; filename="smartprint_${jobId}.pdf"`,
+        'Content-Disposition': `attachment; filename="smartprint_${jobId}.${downloadExt}"`,
         'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
         Pragma: 'no-cache',
         Expires: '0',

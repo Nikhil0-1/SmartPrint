@@ -589,13 +589,57 @@ class CupsController:
             return "OFFLINE", f"CUPS service unavailable: {e}"
 
     # --------------------------------------------------------------------------
-    # Document Validation (PDF / URF)
+    # Document Validation (PDF / URF / Images / Office / Text)
     # --------------------------------------------------------------------------
+    @staticmethod
+    def _detect_document_kind(file_path: str) -> str:
+        """
+        Detects document type from magic bytes:
+        'pdf', 'urf', 'image', 'office_zip', 'office_ole', 'rtf', 'text', or 'unknown'.
+        """
+        with open(file_path, "rb") as f:
+            header = f.read(64)
+
+        if header.startswith(b"%PDF-"):
+            return "pdf"
+        if header.startswith(b"UNIR"):
+            return "urf"
+        # Common image headers: PNG, JPEG, GIF, BMP, WebP (RIFF....WEBP), TIFF
+        if (
+            header.startswith(b"\x89PNG")
+            or header.startswith(b"\xff\xd8")
+            or header.startswith(b"GIF87a")
+            or header.startswith(b"GIF89a")
+            or header.startswith(b"BM")
+            or (header.startswith(b"RIFF") and b"WEBP" in header[:16])
+            or header.startswith(b"II*\x00")
+            or header.startswith(b"MM\x00*")
+        ):
+            return "image"
+        # OOXML / OpenDocument (ZIP container)
+        if header.startswith(b"PK\x03\x04") or header.startswith(b"PK\x05\x06"):
+            return "office_zip"
+        # Legacy MS Office OLE2 Compound Document (.doc, .ppt, .xls)
+        if header.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            return "office_ole"
+        # Rich Text Format
+        if header.lstrip().startswith(b"{\\rtf"):
+            return "rtf"
+        # Plain text (only for explicit text extensions to reject corrupted binary/PDF payloads)
+        lower_path = file_path.lower()
+        if lower_path.endswith((".txt", ".csv", ".log", ".md")) and b"\x00" not in header:
+            try:
+                header.decode("utf-8")
+                return "text"
+            except UnicodeDecodeError:
+                pass
+        return "unknown"
+
     @staticmethod
     def validate_document(file_path: str, max_size_mb: int = 50) -> None:
         """
         Validates that the file exists, is readable, within size limits,
-        and starts with valid PDF magic bytes.
+        and is a supported printable format (PDF, URF, Image, Office, or Text).
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Print payload document not found: {file_path}")
@@ -610,43 +654,123 @@ class CupsController:
                 f"Document size ({size_bytes / (1024 * 1024):.1f} MB) exceeds limit of {max_size_mb} MB"
             )
 
-        with open(file_path, "rb") as f:
-            header = f.read(8)
-            # Accept %PDF-, URF magic bytes (UNIR), PNG (\x89PNG\r\n), or JPEG (\xff\xd8\xff)
-            is_pdf = header.startswith(b"%PDF-")
-            is_urf = header.startswith(b"UNIR")
-            is_png = header.startswith(b"\x89PNG\r")
-            is_jpeg = header.startswith(b"\xff\xd8\xff")
-            if not (is_pdf or is_urf or is_png or is_jpeg):
-                raise ValueError(
-                    f"Invalid document format: expected PDF (got header {header!r})"
-                )
+        kind = CupsController._detect_document_kind(file_path)
+        if kind == "unknown":
+            with open(file_path, "rb") as f:
+                header = f.read(8)
+            raise ValueError(
+                f"Invalid document format: expected PDF, Image, or Office document (got header {header!r})"
+            )
+
+    @staticmethod
+    def _infer_office_extension(file_path: str, kind: str) -> str:
+        """Infers the proper Office/text extension from magic bytes or ZIP entries for LibreOffice."""
+        if kind == "rtf":
+            return ".rtf"
+        if kind == "text":
+            return ".txt"
+        if kind == "office_ole":
+            return ".doc"
+        if kind == "office_zip":
+            try:
+                import zipfile
+                with zipfile.ZipFile(file_path, "r") as zf:
+                    names = zf.namelist()
+                    if any(n.startswith("word/") for n in names):
+                        return ".docx"
+                    if any(n.startswith("ppt/") for n in names):
+                        return ".pptx"
+                    if any(n.startswith("xl/") for n in names):
+                        return ".xlsx"
+            except Exception:
+                pass
+            return ".docx"
+        return ".bin"
 
     @staticmethod
     def ensure_pdf_or_printable(file_path: str) -> str:
         """
-        If the file is an image (PNG, JPEG), convert it to a standard A4 PDF
-        using Pillow (PIL) for maximum compatibility with CUPS laser queues.
+        Converts non-PDF payloads (Images via Pillow, Office/Text via LibreOffice headless)
+        to a standard A4 PDF for maximum compatibility with CUPS laser queues.
         """
         try:
-            with open(file_path, "rb") as f:
-                header = f.read(8)
-            if header.startswith(b"%PDF-") or header.startswith(b"UNIR"):
+            kind = CupsController._detect_document_kind(file_path)
+            if kind in ("pdf", "urf"):
                 return file_path
 
-            if header.startswith(b"\x89PNG\r") or header.startswith(b"\xff\xd8\xff"):
+            if kind == "image":
                 try:
                     from PIL import Image
                     img = Image.open(file_path)
-                    if img.mode in ("RGBA", "LA", "P"):
+                    if img.mode in ("RGBA", "LA", "P", "CMYK"):
                         img = img.convert("RGB")
+                    elif img.mode != "RGB":
+                        img = img.convert("RGB")
+
+                    # Fit proportionally onto an A4 canvas (150 DPI: 1240 x 1754 px) with 0.5in margins
+                    a4_w, a4_h = 1240, 1754
+                    margin = 75
+                    max_w, max_h = a4_w - margin * 2, a4_h - margin * 2
+                    img_w, img_h = img.size
+                    scale = min(max_w / max(img_w, 1), max_h / max(img_h, 1), 1.0)
+                    new_w = max(1, int(img_w * scale))
+                    new_h = max(1, int(img_h * scale))
+                    if (new_w, new_h) != (img_w, img_h):
+                        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
+
+                    canvas = Image.new("RGB", (a4_w, a4_h), "white")
+                    offset_x = (a4_w - new_w) // 2
+                    offset_y = (a4_h - new_h) // 2
+                    canvas.paste(img, (offset_x, offset_y))
+
                     pdf_path = f"{file_path}.pdf"
-                    img.save(pdf_path, "PDF", resolution=150.0)
-                    logger.info(f"Successfully converted image payload to PDF: {pdf_path}")
+                    canvas.save(pdf_path, "PDF", resolution=150.0)
+                    logger.info(f"Successfully converted image payload to A4 PDF: {pdf_path}")
                     return pdf_path
                 except Exception as e:
                     logger.warning(f"Image-to-PDF conversion bypassed ({e}). Submitting original image to CUPS: {file_path}")
                     return file_path
+
+            if kind in ("office_zip", "office_ole", "rtf", "text"):
+                import shutil
+                out_dir = os.path.dirname(os.path.abspath(file_path))
+                ext = CupsController._infer_office_extension(file_path, kind)
+                temp_office_path = f"{file_path}{ext}" if not file_path.lower().endswith(ext) else file_path
+                if temp_office_path != file_path:
+                    shutil.copy2(file_path, temp_office_path)
+
+                expected_pdf = os.path.splitext(temp_office_path)[0] + ".pdf"
+                try:
+                    cmd = [
+                        "libreoffice",
+                        "--headless",
+                        "--norestore",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        out_dir,
+                        temp_office_path,
+                    ]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    if res.returncode == 0 and os.path.exists(expected_pdf) and os.path.getsize(expected_pdf) > 0:
+                        logger.info(f"Successfully converted {ext} document to PDF via LibreOffice: {expected_pdf}")
+                        return expected_pdf
+                    logger.warning(f"LibreOffice conversion failed (rc={res.returncode}): {res.stderr or res.stdout}")
+                except Exception as e:
+                    logger.warning(f"LibreOffice conversion unavailable ({e}).")
+                finally:
+                    if temp_office_path != file_path and os.path.exists(temp_office_path):
+                        try:
+                            os.remove(temp_office_path)
+                        except Exception:
+                            pass
+
+                if kind != "text":
+                    raise CupsSubmissionError(
+                        f"Cannot print {ext} document: LibreOffice PDF converter is not installed or failed on Pi."
+                    )
+        except CupsSubmissionError:
+            raise
         except Exception as e:
             logger.warning(f"ensure_pdf_or_printable check error: {e}")
         return file_path

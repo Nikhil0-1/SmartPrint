@@ -31,6 +31,7 @@ echo "[1/7] Installing system dependencies..."
 apt-get update -qq
 apt-get install -y --no-install-recommends \
   git python3 python3-pip python3-pil \
+  libreoffice-writer libreoffice-impress libreoffice-calc \
   cups cups-client libcups2-dev \
   ipp-usb \
   2>/dev/null || true

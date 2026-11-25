@@ -653,9 +653,16 @@ class SmartPrintAgent:
                 }
             )
 
-            with urllib.request.urlopen(dl_req, timeout=30, context=ctx) as resp, open(local_file_path, "wb") as f:
+            with urllib.request.urlopen(dl_req, timeout=30, context=ctx) as resp:
                 content = resp.read()
-                f.write(content)
+                cd_header = resp.headers.get("Content-Disposition", "") if resp.headers else ""
+                if "filename=" in cd_header:
+                    cd_name = cd_header.split("filename=")[-1].strip().strip('"').strip("'")
+                    _, ext = os.path.splitext(cd_name)
+                    if ext and ext.lower() not in (".pdf",) and local_file_path.lower().endswith(".pdf"):
+                        local_file_path = os.path.splitext(local_file_path)[0] + ext.lower()
+                with open(local_file_path, "wb") as f:
+                    f.write(content)
 
             if hasattr(os, "chmod"):
                 os.chmod(local_file_path, 0o600)

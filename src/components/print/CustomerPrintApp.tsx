@@ -458,7 +458,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
             <label className="border-2 border-dashed border-slate-300 hover:border-blue-500 bg-slate-50/70 hover:bg-blue-50/30 rounded-2xl p-8 sm:p-10 flex flex-col items-center justify-center cursor-pointer transition-all group">
               <input
                 type="file"
-                accept=".pdf,image/png,image/jpeg,image/jpg"
+                accept=".pdf,image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.odt,.odp,.ods,.rtf,.txt,.csv"
                 className="hidden"
                 disabled={isUploading}
                 onChange={(e) => {
@@ -477,7 +477,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
                   {isUploading ? uploadStatusText : 'Tap or Drop Document Here'}
                 </span>
                 <span className="text-xs text-slate-500 block">
-                  PDF, PNG, JPG (Max {pricing.max_file_size_mb} MB)
+                  PDF, PNG, JPG, DOC, PPT, XLS, TXT (Max {pricing.max_file_size_mb} MB)
                 </span>
               </div>
             </label>

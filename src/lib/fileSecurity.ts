@@ -4,13 +4,54 @@ import { storageService, TemporaryUploadResult } from './storage';
 import { dbGetPrintJob } from './db';
 import { supabaseAdmin, isSupabaseConfigured } from './supabase';
 
-// Allowed MIME types strictly adhering to Section 8.1
+// Allowed MIME types for commercial multi-format printing
 const ALLOWED_MIME_TYPES = new Set([
   'application/pdf',
   'image/jpeg',
   'image/png',
   'image/jpg',
+  'image/webp',
+  'image/bmp',
+  'image/gif',
+  'image/tiff',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.oasis.opendocument.text',
+  'application/vnd.oasis.opendocument.presentation',
+  'application/vnd.oasis.opendocument.spreadsheet',
+  'application/rtf',
+  'text/rtf',
+  'text/plain',
+  'text/csv',
 ]);
+
+const ALLOWED_EXTENSIONS = [
+  '.pdf',
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+  '.bmp',
+  '.gif',
+  '.tif',
+  '.tiff',
+  '.doc',
+  '.docx',
+  '.ppt',
+  '.pptx',
+  '.xls',
+  '.xlsx',
+  '.odt',
+  '.odp',
+  '.ods',
+  '.rtf',
+  '.txt',
+  '.csv',
+];
 
 export interface FileValidationResult {
   valid: boolean;
@@ -134,18 +175,14 @@ export async function validateAndExtractPages(
     };
   }
 
-  // 2. MIME type check
+  // 2. MIME type & extension check
   const lowerName = fileName.toLowerCase();
-  const isAllowedExt =
-    lowerName.endsWith('.pdf') ||
-    lowerName.endsWith('.jpg') ||
-    lowerName.endsWith('.jpeg') ||
-    lowerName.endsWith('.png');
+  const isAllowedExt = ALLOWED_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
 
   if (!ALLOWED_MIME_TYPES.has(mimeType) && !isAllowedExt) {
     return {
       valid: false,
-      error: 'Unsupported file format. Please upload a PDF, PNG, or JPEG file.',
+      error: 'Unsupported file format. Please upload PDF, PNG, JPG, DOC, DOCX, PPT, PPTX, XLS, XLSX, or TXT.',
     };
   }
 
@@ -170,8 +207,11 @@ export async function validateAndExtractPages(
         };
       }
     }
+  } else if (lowerName.endsWith('.txt') || lowerName.endsWith('.csv')) {
+    const lines = fileBuffer.toString('utf8').split(/\r?\n/).length;
+    pageCount = Math.max(1, Math.ceil(lines / 45));
   } else {
-    // Images are strictly 1 page — zero parsing needed
+    // Images and Office documents default to 1 page if not yet rendered to PDF
     pageCount = 1;
   }
 
