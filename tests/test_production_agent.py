@@ -266,6 +266,19 @@ class ProductionAgentTestSuite(unittest.TestCase):
         # Should not raise
         cups_ctrl.validate_document(valid_file)
 
+    def test_image_validation_png_and_jpeg(self):
+        """Verify PNG and JPEG image payloads pass pre-flight validation."""
+        cups_ctrl = CupsController()
+        png_file = os.path.join(self.test_dir, "test.png")
+        with open(png_file, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR...")
+        cups_ctrl.validate_document(png_file)
+
+        jpg_file = os.path.join(self.test_dir, "test.jpg")
+        with open(jpg_file, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0\x00\x10JFIF...")
+        cups_ctrl.validate_document(jpg_file)
+
     # --------------------------------------------------------------------------
     # 4. CUPS QUEUE READINESS & SUBMISSION
     # --------------------------------------------------------------------------

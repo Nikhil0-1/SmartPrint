@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
-import { validateAndExtractPages, saveTemporaryDocumentMultiTenant } from '@/lib/fileSecurity';
+import { validateAndExtractPages, saveTemporaryDocumentMultiTenant, convertImageToPdf } from '@/lib/fileSecurity';
 import { storageService } from '@/lib/storage';
 import { dbGetKiosk, dbGetPricing, dbCreatePrintJob } from '@/lib/db';
 
@@ -48,8 +48,22 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the limit.` }, { status: 400 });
       }
       const arrayBuffer = await file.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      const validation = await validateAndExtractPages(buffer, file.type, file.name, pricing?.max_file_size_mb ?? 40);
+      let buffer = Buffer.from(arrayBuffer);
+      let uploadMime = file.type;
+
+      // Automatically convert images (PNG, JPEG) to standardized A4 PDF
+      const isImg = file.type.startsWith('image/') || /\.(png|jpe?g)$/i.test(file.name);
+      if (isImg) {
+        try {
+          const converted = await convertImageToPdf(buffer, file.type, file.name);
+          buffer = Buffer.from(converted.buffer as ArrayBuffer, converted.byteOffset, converted.byteLength);
+          uploadMime = 'application/pdf';
+        } catch (convErr) {
+          console.warn('[UPLOAD] Image to PDF conversion fallback to raw image:', convErr);
+        }
+      }
+
+      const validation = await validateAndExtractPages(buffer, uploadMime, file.name, pricing?.max_file_size_mb ?? 40);
       if (!validation.valid) return NextResponse.json({ error: validation.error }, { status: 400 });
       const pageCount = validation.pageCount || 1;
       if (pageCount > (pricing?.max_pages ?? 100)) {
@@ -79,7 +93,7 @@ export async function POST(request: Request) {
           sessionId || 'sess_default',
           jobId,
           buffer,
-          file.type,
+          uploadMime,
           file.name
         ),
         dbCreatePrintJob({

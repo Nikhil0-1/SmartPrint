@@ -67,6 +67,58 @@ export function fastCountPdfPages(buffer: Buffer): number | null {
   }
 }
 
+/**
+ * Standardizes an image buffer (PNG / JPEG) into a high-quality A4 PDF.
+ * Scales the image proportionally within printable bounds with 0.5-inch margins.
+ */
+export async function convertImageToPdf(
+  imageBuffer: Buffer,
+  mimeType?: string,
+  filename?: string
+): Promise<Buffer> {
+  const pdfDoc = await PDFDocument.create();
+  // Standard A4 dimensions in PDF points (72 DPI): 595.28 x 841.89 pt
+  const A4_WIDTH = 595.28;
+  const A4_HEIGHT = 841.89;
+  const MARGIN = 36; // 0.5 inch margin
+
+  const isPng =
+    (mimeType && mimeType.includes('png')) ||
+    (filename && filename.toLowerCase().endsWith('.png')) ||
+    (imageBuffer.length > 4 && imageBuffer[0] === 0x89 && imageBuffer[1] === 0x50);
+
+  let embeddedImage;
+  if (isPng) {
+    embeddedImage = await pdfDoc.embedPng(imageBuffer);
+  } else {
+    embeddedImage = await pdfDoc.embedJpg(imageBuffer);
+  }
+
+  const { width: imgWidth, height: imgHeight } = embeddedImage;
+  const maxContentWidth = A4_WIDTH - MARGIN * 2;
+  const maxContentHeight = A4_HEIGHT - MARGIN * 2;
+
+  // Preserve aspect ratio; fit within printable canvas
+  const scale = Math.min(maxContentWidth / imgWidth, maxContentHeight / imgHeight, 1.0);
+  const scaledWidth = imgWidth * scale;
+  const scaledHeight = imgHeight * scale;
+
+  // Center on A4 page
+  const x = (A4_WIDTH - scaledWidth) / 2;
+  const y = (A4_HEIGHT - scaledHeight) / 2;
+
+  const page = pdfDoc.addPage([A4_WIDTH, A4_HEIGHT]);
+  page.drawImage(embeddedImage, {
+    x,
+    y,
+    width: scaledWidth,
+    height: scaledHeight,
+  });
+
+  const pdfBytes = await pdfDoc.save();
+  return Buffer.from(pdfBytes.buffer as ArrayBuffer, pdfBytes.byteOffset, pdfBytes.byteLength);
+}
+
 export async function validateAndExtractPages(
   fileBuffer: Buffer,
   mimeType: string,

@@ -611,12 +611,45 @@ class CupsController:
             )
 
         with open(file_path, "rb") as f:
-            header = f.read(5)
-            # Accept %PDF- or URF magic bytes (UNIRAST)
-            if header != b"%PDF-" and not header.startswith(b"UNIR"):
+            header = f.read(8)
+            # Accept %PDF-, URF magic bytes (UNIR), PNG (\x89PNG\r\n), or JPEG (\xff\xd8\xff)
+            is_pdf = header.startswith(b"%PDF-")
+            is_urf = header.startswith(b"UNIR")
+            is_png = header.startswith(b"\x89PNG\r")
+            is_jpeg = header.startswith(b"\xff\xd8\xff")
+            if not (is_pdf or is_urf or is_png or is_jpeg):
                 raise ValueError(
                     f"Invalid document format: expected PDF (got header {header!r})"
                 )
+
+    @staticmethod
+    def ensure_pdf_or_printable(file_path: str) -> str:
+        """
+        If the file is an image (PNG, JPEG), convert it to a standard A4 PDF
+        using Pillow (PIL) for maximum compatibility with CUPS laser queues.
+        """
+        try:
+            with open(file_path, "rb") as f:
+                header = f.read(8)
+            if header.startswith(b"%PDF-") or header.startswith(b"UNIR"):
+                return file_path
+
+            if header.startswith(b"\x89PNG\r") or header.startswith(b"\xff\xd8\xff"):
+                try:
+                    from PIL import Image
+                    img = Image.open(file_path)
+                    if img.mode in ("RGBA", "LA", "P"):
+                        img = img.convert("RGB")
+                    pdf_path = f"{file_path}.pdf"
+                    img.save(pdf_path, "PDF", resolution=150.0)
+                    logger.info(f"Successfully converted image payload to PDF: {pdf_path}")
+                    return pdf_path
+                except Exception as e:
+                    logger.warning(f"Image-to-PDF conversion bypassed ({e}). Submitting original image to CUPS: {file_path}")
+                    return file_path
+        except Exception as e:
+            logger.warning(f"ensure_pdf_or_printable check error: {e}")
+        return file_path
 
     # --------------------------------------------------------------------------
     # Atomic Single Print Submission
@@ -638,7 +671,10 @@ class CupsController:
         # 1. Pre-flight document validation
         self.validate_document(file_path)
 
-        # 2. Pre-flight queue check
+        # 2. Convert PNG / JPEG to printable PDF if needed
+        actual_file_path = self.ensure_pdf_or_printable(file_path)
+
+        # 3. Pre-flight queue check
         queue_status, queue_msg = self.get_queue_status(target_queue)
         if queue_status in ("STOPPED", "OFFLINE", "ERROR", "PAPER_OUT", "TONER_EMPTY"):
             raise CupsQueueUnavailableError(
@@ -693,7 +729,7 @@ class CupsController:
                 self._init_connection()
             if self.conn:
                 try:
-                    raw_id = self.conn.printFile(target_queue, file_path, doc_title, cups_opts)
+                    raw_id = self.conn.printFile(target_queue, actual_file_path, doc_title, cups_opts)
                     if isinstance(raw_id, int) and raw_id > 0:
                         cups_job_id = raw_id
                         logger.info(f"pycups printFile accepted: queue='{target_queue}' job_id={cups_job_id}")
@@ -720,7 +756,7 @@ class CupsController:
                 lp_cmd.extend(["-o", "sides=two-sided-long-edge"])
             if orientation == "landscape":
                 lp_cmd.extend(["-o", "landscape"])
-            lp_cmd.append(file_path)
+            lp_cmd.append(actual_file_path)
 
             logger.info(f"Executing CLI LP submission: {' '.join(lp_cmd)}")
             try:

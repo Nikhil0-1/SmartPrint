@@ -3,7 +3,7 @@ import { store } from '@/lib/store';
 import { dbGetPrintJob } from '@/lib/db';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { authenticateDeviceRequest, validateJobScope } from '@/lib/deviceAuth';
-import { getTemporaryDocument } from '@/lib/fileSecurity';
+import { getTemporaryDocument, convertImageToPdf } from '@/lib/fileSecurity';
 
 export async function GET(
   request: Request,
@@ -44,7 +44,7 @@ export async function GET(
     }
 
     // 5. Retrieve ephemeral file
-    const docBuffer = await getTemporaryDocument(jobId);
+    let docBuffer = await getTemporaryDocument(jobId);
     if (!docBuffer) {
       return new NextResponse('Temporary document unavailable or deleted', { status: 410 });
     }
@@ -55,11 +55,21 @@ export async function GET(
       ? String((job as unknown as Record<string, unknown>).original_filename)
       : 'document.pdf';
 
-    const mimeType = filename.endsWith('.png')
-      ? 'image/png'
-      : filename.endsWith('.jpg') || filename.endsWith('.jpeg')
-      ? 'image/jpeg'
-      : 'application/pdf';
+    // Fallback: If stored bytes are raw image (PNG / JPEG), convert dynamically to A4 PDF
+    let mimeType = 'application/pdf';
+    if (docBuffer.length > 4) {
+      const isPng = docBuffer[0] === 0x89 && docBuffer[1] === 0x50 && docBuffer[2] === 0x4e;
+      const isJpg = docBuffer[0] === 0xff && docBuffer[1] === 0xd8;
+      if (isPng || isJpg) {
+        try {
+          const converted = await convertImageToPdf(docBuffer, isPng ? 'image/png' : 'image/jpeg', filename);
+          docBuffer = Buffer.from(converted.buffer as ArrayBuffer, converted.byteOffset, converted.byteLength);
+        } catch (convErr) {
+          console.warn('[DOWNLOAD] Runtime image-to-PDF conversion warning:', convErr);
+          mimeType = isPng ? 'image/png' : 'image/jpeg';
+        }
+      }
+    }
 
     return new NextResponse(new Uint8Array(docBuffer), {
       status: 200,
