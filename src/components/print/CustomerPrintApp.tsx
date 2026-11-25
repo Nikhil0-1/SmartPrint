@@ -49,6 +49,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
   const [jobId, setJobId] = useState<string>('');
   const [totalPages, setTotalPages] = useState<number>(1);
   const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadStatusText, setUploadStatusText] = useState<string>('Fast Uploading & Counting Pages...');
   const [uploadError, setUploadError] = useState<string>('');
 
   // Print Configuration
@@ -115,6 +116,9 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
   const handleFileUpload = async (selectedFile: File) => {
     setIsUploading(true);
     setUploadError('');
+
+    const isImg = selectedFile.type.startsWith('image/') || /\.(png|jpe?g)$/i.test(selectedFile.name);
+    setUploadStatusText(isImg ? 'Fast Uploading Image...' : 'Fast Uploading & Counting Pages...');
 
     try {
       const formData = new FormData();
@@ -470,7 +474,7 @@ function PrintAppContent({ orgSlug: initialOrgSlug, kioskSlug: initialKioskSlug 
               </div>
               <div className="text-center space-y-1">
                 <span className="text-sm sm:text-base font-bold text-slate-800 block">
-                  {isUploading ? 'Validating & Counting Pages...' : 'Tap or Drop Document Here'}
+                  {isUploading ? uploadStatusText : 'Tap or Drop Document Here'}
                 </span>
                 <span className="text-xs text-slate-500 block">
                   PDF, PNG, JPG (Max {pricing.max_file_size_mb} MB)

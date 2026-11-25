@@ -835,17 +835,12 @@ export async function dbGetPrinters(organizationId?: string, kioskId?: string): 
   // or hasn't had heartbeat detection in over 180 seconds, reflect it as OFFLINE
   return printers.map((p) => {
     if (p.status === 'READY') {
-      const isPantum = (p.manufacturer || '').toLowerCase().includes('pantum') ||
-                       (p.cups_queue_name || '').toLowerCase().includes('pantum') ||
-                       p.id === '44444444-4444-4444-4444-444444444444';
-      if (!isPantum) {
-        if (!p.last_detected_at || (now - new Date(p.last_detected_at).getTime() > 180000)) {
-          return {
-            ...p,
-            status: 'OFFLINE' as const,
-            last_error: p.last_error || 'Printer not detected on USB or network',
-          };
-        }
+      if (!p.last_detected_at || (now - new Date(p.last_detected_at).getTime() > 180000)) {
+        return {
+          ...p,
+          status: 'OFFLINE' as const,
+          last_error: p.last_error || 'Printer not detected on USB or network',
+        };
       }
     }
     return p;
@@ -1138,18 +1133,16 @@ export async function dbUpsertDiscoveredPrinters(
     const nowStr = new Date().toISOString();
     for (const p of existingPrinters) {
       if (!matchedPrinterIds.has(p.id)) {
-        if (p.status !== 'OFFLINE') {
-          await dbUpdatePrinter(p.id, {
-            status: 'OFFLINE',
-            last_error: 'Printer not detected on USB or network',
-            updated_at: nowStr,
-          });
-          store.updatePrinter(p.id, {
-            status: 'OFFLINE',
-            last_error: 'Printer not detected on USB or network',
-          });
-          updatedCount++;
-        }
+        await dbUpdatePrinter(p.id, {
+          status: 'OFFLINE',
+          last_error: 'Printer not detected on USB or network',
+          updated_at: nowStr,
+        });
+        store.updatePrinter(p.id, {
+          status: 'OFFLINE',
+          last_error: 'Printer not detected on USB or network',
+        });
+        updatedCount++;
       }
     }
 

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { store, GITAM_ORG_ID } from '@/lib/store';
 import { validateAndExtractPages, saveTemporaryDocumentMultiTenant } from '@/lib/fileSecurity';
+import { storageService } from '@/lib/storage';
 import { dbGetKiosk, dbGetPricing, dbCreatePrintJob } from '@/lib/db';
 
 export const maxDuration = 30;
@@ -63,33 +64,44 @@ export async function POST(request: Request) {
       const bwPricePaise = pricing?.bw_price_paise || Math.round((pricing?.bw_price_per_page ?? 2.5) * 100);
       const jobPaise = pageCount * bwPricePaise;
       totalPaise += jobPaise;
-      const uploadResult = await saveTemporaryDocumentMultiTenant(
+
+      // Deterministic storage key allows parallel storage upload + DB insert
+      const objectKey = storageService.buildObjectKey(
         organizationId,
         sessionId || 'sess_default',
         jobId,
-        buffer,
-        file.type,
         file.name
       );
-      const dbJob = await dbCreatePrintJob({
-        id: jobId,
-        organization_id: organizationId,
-        session_id: sessionId || null,
-        kiosk_id: kioskId,
-        pages_total: pageCount,
-        pages_selected: 'All',
-        copies: 1,
-        is_color: false,
-        is_duplex: false,
-        orientation: 'portrait',
-        paper_size: 'A4',
-        calculated_amount: jobPaise / 100,
-        amount_paise: jobPaise,
-        idempotency_key: idempotencyKey,
-        document_name: file.name,
-        file_storage_path: uploadResult.objectKey,
-        status: 'UPLOAD_COMPLETE',
-      });
+
+      const [uploadResult] = await Promise.all([
+        saveTemporaryDocumentMultiTenant(
+          organizationId,
+          sessionId || 'sess_default',
+          jobId,
+          buffer,
+          file.type,
+          file.name
+        ),
+        dbCreatePrintJob({
+          id: jobId,
+          organization_id: organizationId,
+          session_id: sessionId || null,
+          kiosk_id: kioskId,
+          pages_total: pageCount,
+          pages_selected: 'All',
+          copies: 1,
+          is_color: false,
+          is_duplex: false,
+          orientation: 'portrait',
+          paper_size: 'A4',
+          calculated_amount: jobPaise / 100,
+          amount_paise: jobPaise,
+          idempotency_key: idempotencyKey,
+          document_name: file.name,
+          file_storage_path: objectKey,
+          status: 'UPLOAD_COMPLETE',
+        }),
+      ]);
       store.registerFile(jobId, file.name, file.type, file.size, pageCount, uploadResult.objectKey, organizationId);
       store.createJob({
         id: jobId,
