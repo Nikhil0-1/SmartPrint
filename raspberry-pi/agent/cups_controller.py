@@ -436,7 +436,7 @@ class CupsController:
                             "cups_queue_name": pantum_q,
                             "device_uri": p_uri,
                             "connection_type": "USB",
-                            "status": p_status if p_status in ("READY", "BUSY") else "READY",
+                            "status": p_status,
                             "printer_type": "BW",
                             "supports_color": False,
                             "supports_duplex": True,

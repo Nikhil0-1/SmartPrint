@@ -446,7 +446,62 @@ class SmartPrintAgent:
                 {"job_id": job_id, "status": "FAILED", "error_message": "Agent restarted before print submission"}
             )
 
-        # 3. Clean up expired recovery retention files
+        # 3. Check jobs that were left in OUTCOME_UNCERTAIN on previous run:
+        # Attempt CUPS history check and auto-recover if CUPS shows them completed.
+        all_unresolved = self.state_mgr.get_unresolved_recovery_jobs()
+        outcome_uncertain_jobs = [j for j in all_unresolved if j.get("status") == STATE_OUTCOME_UNCERTAIN]
+        for job in outcome_uncertain_jobs:
+            job_id = job["job_id"]
+            cups_job_id = job.get("cups_job_id")
+            cups_queue = job.get("cups_queue") or self.cups.default_queue
+            logger.warning(
+                f"CRASH RECOVERY: Found job {job_id} in OUTCOME_UNCERTAIN with CUPS ID {cups_job_id}. "
+                f"Attempting post-hoc verification..."
+            )
+            if cups_job_id:
+                # Quick check: did the job complete in CUPS history?
+                try:
+                    success, msg = self.cups.wait_for_job_completion(
+                        cups_job_id, timeout_seconds=8, queue_name=cups_queue
+                    )
+                    if success:
+                        logger.info(
+                            f"CRASH RECOVERY: OUTCOME_UNCERTAIN job {job_id} retrospectively confirmed COMPLETED in CUPS. "
+                            f"Enqueuing cloud completion."
+                        )
+                        self.state_mgr.transition_status(job_id, STATE_COMPLETED, cups_job_id=cups_job_id)
+                        self.state_mgr.enqueue_outbox(
+                            job_id, "/api/kiosk/job-complete", {"job_id": job_id, "cups_job_id": cups_job_id}
+                        )
+                        self.doc_mgr.cleanup_job_workspace(job_id)
+                    else:
+                        # Cannot verify — report to cloud so admin can decide
+                        logger.warning(
+                            f"CRASH RECOVERY: Job {job_id} OUTCOME_UNCERTAIN still unverified after CUPS check ({msg}). "
+                            f"Reporting to cloud for admin review. No auto-reprint."
+                        )
+                        self.state_mgr.enqueue_outbox(
+                            job_id, "/api/kiosk/update-status",
+                            {"job_id": job_id, "status": "OUTCOME_UNCERTAIN",
+                             "error_message": f"Startup check: {msg}. Admin manual review required."}
+                        )
+                except Exception as ex:
+                    logger.warning(f"CRASH RECOVERY: CUPS check for OUTCOME_UNCERTAIN job {job_id} failed: {ex}")
+            else:
+                # No CUPS job ID → definitely failed before submission
+                logger.warning(
+                    f"CRASH RECOVERY: OUTCOME_UNCERTAIN job {job_id} has no CUPS ID. "
+                    f"Marking FAILED_BEFORE_SUBMISSION."
+                )
+                self.state_mgr.transition_status(
+                    job_id, STATE_FAILED_BEFORE_SUBMISSION, error_message="Reboot recovery: No CUPS job ID"
+                )
+                self.state_mgr.enqueue_outbox(
+                    job_id, "/api/kiosk/update-status",
+                    {"job_id": job_id, "status": "FAILED", "error_message": "Agent restarted — no CUPS submission record found"}
+                )
+
+        # 4. Clean up expired recovery retention files
         purged = self.doc_mgr.cleanup_expired_recovery_files(max_age_hours=24)
         if purged > 0:
             logger.info(f"Cleaned up {purged} expired recovery files (> 24h old).")
@@ -724,6 +779,22 @@ class SmartPrintAgent:
         try:
             cups_job_id = self.cups.submit_print_job(local_file_path, options, queue_name=target_queue)
             logger.info(f"CUPS accepted job {job_id} with verified CUPS Job ID: {cups_job_id}")
+        except CupsQueueUnavailableError as e:
+            # Queue was unavailable BEFORE any print submission occurred — safe to mark RECOVERY_REQUIRED
+            err_text = f"Printer queue unavailable before submission for job {job_id}: {e}"
+            logger.error(err_text)
+            self.doc_mgr.preserve_for_recovery(
+                job_id, local_file_path, {"error": str(e), "queue": target_queue}
+            )
+            self.state_mgr.transition_status(
+                job_id, STATE_RECOVERY_REQUIRED, error_message=err_text, recovery_reason="Queue unavailable before submission"
+            )
+            self.make_api_request("/api/kiosk/update-status", {
+                "job_id": job_id,
+                "status": "RECOVERY_REQUIRED",
+                "error_message": err_text
+            })
+            return
         except Exception as e:
             err_text = f"CUPS submission error for job {job_id}: {e}"
             logger.error(err_text)
@@ -762,10 +833,26 @@ class SmartPrintAgent:
         })
 
         # Step I: Monitor Completion
-        timeout_sec = self.config.get("job_timeout_seconds", 120)
+        timeout_sec = self.config.get("job_timeout_seconds", 180)
         success, status_msg = self.cups.wait_for_job_completion(
             cups_job_id, timeout_seconds=timeout_sec, queue_name=target_queue
         )
+
+        # Post-timeout: if timed out, do one final CUPS history check before declaring OUTCOME_UNCERTAIN
+        if not success and "timed out" in status_msg.lower():
+            logger.warning(
+                f"Job {job_id} monitoring timed out. Performing final CUPS history verification..."
+            )
+            try:
+                final_check, final_msg = self.cups.wait_for_job_completion(
+                    cups_job_id, timeout_seconds=15, queue_name=target_queue
+                )
+                if final_check:
+                    success = True
+                    status_msg = "Job completed on final verification pass"
+                    logger.info(f"FINAL CHECK: Job {job_id} CUPS ID {cups_job_id} confirmed COMPLETED on second look.")
+            except Exception as ex:
+                logger.warning(f"Final CUPS check exception for job {job_id}: {ex}")
 
         if success:
             logger.info(f"CUPS Job {cups_job_id} for job {job_id} verified COMPLETED!")

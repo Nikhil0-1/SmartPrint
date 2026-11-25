@@ -65,21 +65,29 @@ export async function GET(request: Request) {
     const isFailed =
       job.status === 'FAILED' ||
       job.status === 'RECOVERY_REQUIRED' ||
+      job.status === 'OUTCOME_UNCERTAIN' ||
       job.status === 'CANCELLED' ||
       job.status === 'PAYMENT_FAILED';
+
+    const resolvedLabel =
+      queueInfo?.status_label && queueInfo.status_label !== job.status
+        ? queueInfo.status_label
+        : getFriendlyStatusLabel(job.status, queueInfo?.jobs_ahead || 0);
 
     return NextResponse.json({
       success: true,
       job_id: job.id,
       status: job.status,
-      status_label: queueInfo?.status_label || getFriendlyStatusLabel(job.status, queueInfo?.jobs_ahead || 0),
+      status_label: resolvedLabel,
       queue_position: queueInfo?.queue_position || 1,
       jobs_ahead: queueInfo?.jobs_ahead || 0,
       printer_name: queueInfo?.printer_name || 'Assigned Printer',
       estimated_wait_seconds: queueInfo?.estimated_wait_seconds || 0,
       is_completed: isCompleted,
       is_failed: isFailed,
-      error_message: job.error_message || null,
+      error_message: job.status === 'OUTCOME_UNCERTAIN'
+        ? 'Your document was sent to the printer but we could not confirm if it printed. Please check the printer tray. If your document did not print, please contact support.'
+        : (job.error_message || null),
     });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
@@ -111,6 +119,8 @@ function getFriendlyStatusLabel(status: string, jobsAhead: number): string {
     case 'FAILED':
     case 'RECOVERY_REQUIRED':
       return 'Print failed — assistance required';
+    case 'OUTCOME_UNCERTAIN':
+      return 'Job sent to printer — please check if your document printed. Contact support if not.';
     case 'CANCELLED':
       return 'Job cancelled';
     default:

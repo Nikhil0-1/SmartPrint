@@ -1788,6 +1788,8 @@ function getFriendlyStatusLabel(status: PrintJobStatus | string, jobsAhead: numb
     case 'FAILED':
     case 'RECOVERY_REQUIRED':
       return 'Print failed — assistance required';
+    case 'OUTCOME_UNCERTAIN':
+      return 'Job sent to printer — please check if your document printed';
     case 'CANCELLED':
       return 'Job cancelled';
     default:
