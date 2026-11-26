@@ -51,16 +51,13 @@ export async function POST(request: Request) {
       let buffer = Buffer.from(arrayBuffer);
       let uploadMime = file.type;
 
-      // Automatically convert images (PNG, JPEG) to standardized A4 PDF
-      const isImg = file.type.startsWith('image/') || /\.(png|jpe?g)$/i.test(file.name);
+      // Automatically convert images (PNG, JPEG, WebP, BMP, GIF, TIFF) to standardized A4 PDF
+      // This MUST succeed before upload — the Pi expects PDF; raw images are only accepted by updated Pi agents.
+      const isImg = file.type.startsWith('image/') || /\.(png|jpe?g|jpg|webp|bmp|gif|tiff?)$/i.test(file.name);
       if (isImg) {
-        try {
-          const converted = await convertImageToPdf(buffer, file.type, file.name);
-          buffer = Buffer.from(converted.buffer as ArrayBuffer, converted.byteOffset, converted.byteLength);
-          uploadMime = 'application/pdf';
-        } catch (convErr) {
-          console.warn('[UPLOAD] Image to PDF conversion fallback to raw image:', convErr);
-        }
+        const converted = await convertImageToPdf(buffer, file.type, file.name);
+        buffer = Buffer.from(converted.buffer as ArrayBuffer, converted.byteOffset, converted.byteLength);
+        uploadMime = 'application/pdf';
       }
 
       const validation = await validateAndExtractPages(buffer, uploadMime, file.name, pricing?.max_file_size_mb ?? 40);

@@ -792,11 +792,12 @@ class CupsController:
         """
         target_queue = queue_name or self.default_queue
 
-        # 1. Pre-flight document validation
-        self.validate_document(file_path)
-
-        # 2. Convert PNG / JPEG to printable PDF if needed
+        # 1. Convert image / Office docs to printable PDF FIRST (before validation)
+        # This ensures old validation code never sees raw PNG/JPEG bytes.
         actual_file_path = self.ensure_pdf_or_printable(file_path)
+
+        # 2. Pre-flight document validation (validates the converted-to-PDF result)
+        self.validate_document(actual_file_path)
 
         # 3. Pre-flight queue check
         queue_status, queue_msg = self.get_queue_status(target_queue)
