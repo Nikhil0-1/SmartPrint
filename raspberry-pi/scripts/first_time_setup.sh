@@ -33,7 +33,7 @@ apt-get install -y --no-install-recommends \
   git python3 python3-pip python3-pil \
   libreoffice-writer libreoffice-impress libreoffice-calc \
   cups cups-client libcups2-dev \
-  ipp-usb \
+  ipp-usb hplip printer-driver-hpcups printer-driver-foo2zjs usb-modeswitch \
   2>/dev/null || true
 
 # Install python cups binding
@@ -97,10 +97,16 @@ echo "[6/7] Installing systemd service..."
 bash "$INSTALL_DIR/raspberry-pi/scripts/enable_autostart.sh"
 
 # 8. Enable and start CUPS + ipp-usb
-echo "[7/7] Enabling CUPS and ipp-usb services..."
+echo "[7/7] Enabling CUPS, ipp-usb, and auto-provisioning attached printers..."
 systemctl enable cups ipp-usb 2>/dev/null || true
 systemctl start cups 2>/dev/null || true
 systemctl start ipp-usb 2>/dev/null || true
+if lsusb | grep -qiE "232b:|pantum"; then
+  bash "$INSTALL_DIR/raspberry-pi/scripts/setup_pantum_m7100dw.sh" || true
+fi
+if lsusb | grep -qiE "03f0:(002a|112a)|p1108"; then
+  bash "$INSTALL_DIR/raspberry-pi/scripts/setup_hp_p1108.sh" || true
+fi
 
 echo "========================================================"
 echo "  SETUP COMPLETE!"

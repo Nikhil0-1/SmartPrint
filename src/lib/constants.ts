@@ -171,6 +171,33 @@ export const INITIAL_PRINTERS: Printer[] = [
     },
     last_test_print: new Date().toISOString(),
   },
+  {
+    id: '55555555-5555-5555-5555-555555555555',
+    kiosk_id: 'GITAM-SPK-001',
+    printer_name: 'HP LaserJet P1108',
+    display_name: 'HP LaserJet P1108 (USB)',
+    manufacturer: 'HP',
+    model: 'HP LaserJet P1108',
+    cups_queue_name: 'HP_LaserJet_P1108',
+    connection_type: 'USB',
+    status: 'OFFLINE',
+    printer_type: 'BW',
+    enabled: true,
+    priority: 2,
+    is_default: false,
+    supports_color: false,
+    supports_duplex: false,
+    capabilities: {
+      color: false,
+      grayscale: true,
+      duplex: false,
+      paper_sizes: ['A4', 'Letter'],
+      resolutions: ['600dpi'],
+      cups_state: 'idle',
+      queue_state: 'enabled',
+    },
+    last_test_print: new Date().toISOString(),
+  },
 ];
 
 export const INITIAL_PRINTER_ROUTING = [

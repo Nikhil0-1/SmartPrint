@@ -165,6 +165,117 @@ class CupsController:
         return queue_name
 
     # --------------------------------------------------------------------------
+    # Zero-Touch HP LaserJet P1108 Queue Auto-Provisioning
+    # --------------------------------------------------------------------------
+    def _ensure_hp_p1108_queue_registered(self) -> Optional[str]:
+        """
+        Zero-touch auto-provisioning for HP LaserJet P1108 Monochrome Laser Printer.
+        Detects HP P1108 on USB (VID 03f0, PID 002a/112a or model string P1108),
+        auto-creates CUPS queue 'HP_LaserJet_P1108' using HPLIP/hpcups or foo2zjs
+        driver if not present, and configures A4 monochrome simplex.
+        """
+        p1108_detected = False
+        device_uri = None
+
+        # 1. Check lsusb for HP LaserJet P1108 hardware (VID 03f0, PID 002a / 112a or P1108)
+        try:
+            lsusb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
+            lsusb_lower = lsusb_out.lower()
+            if "p1108" in lsusb_lower or "03f0:002a" in lsusb_lower or "03f0:112a" in lsusb_lower:
+                p1108_detected = True
+        except Exception:
+            pass
+
+        # 2. Check lpinfo -v for HP LaserJet P1108 USB or hp:/ backend URI
+        try:
+            lpinfo_out = subprocess.check_output(["lpinfo", "-v"], text=True, stderr=subprocess.DEVNULL)
+            for line in lpinfo_out.splitlines():
+                line_lower = line.lower()
+                if "p1108" in line_lower or ("03f0" in line_lower and "p110" in line_lower):
+                    p1108_detected = True
+                    parts = line.strip().split(None, 1)
+                    if len(parts) >= 2:
+                        candidate_uri = parts[1].strip()
+                        # Prefer hp:/ backend over raw usb:// when both are listed
+                        if candidate_uri.startswith("hp:/") or not device_uri:
+                            device_uri = candidate_uri
+                            if candidate_uri.startswith("hp:/"):
+                                break
+        except Exception:
+            pass
+
+        if not p1108_detected:
+            return None
+
+        if not device_uri:
+            device_uri = "usb://HP/LaserJet%20Professional%20P1108"
+
+        queue_name = "HP_LaserJet_P1108"
+
+        # Check if queue already exists
+        queue_exists = False
+        try:
+            q_check = subprocess.check_output(["lpstat", "-p", queue_name], text=True, stderr=subprocess.DEVNULL)
+            if queue_name in q_check:
+                queue_exists = True
+        except Exception:
+            queue_exists = False
+
+        if not queue_exists:
+            logger.info(f"HP LaserJet P1108 detected on USB. Auto-registering CUPS queue '{queue_name}' with URI '{device_uri}'...")
+            try:
+                # Find best available PPD for P1108 (prefer hpcups, then foo2zjs, then generic)
+                ppd_model = None
+                try:
+                    lpinfo_m = subprocess.check_output(["lpinfo", "-m"], text=True, stderr=subprocess.DEVNULL)
+                    for m_line in lpinfo_m.splitlines():
+                        m_lower = m_line.lower()
+                        if "p1108" in m_lower and "hpcups" in m_lower:
+                            ppd_model = m_line.split(None, 1)[0].strip()
+                            break
+                    if not ppd_model:
+                        for m_line in lpinfo_m.splitlines():
+                            m_lower = m_line.lower()
+                            if "p1108" in m_lower or "p1102" in m_lower:
+                                ppd_model = m_line.split(None, 1)[0].strip()
+                                break
+                except Exception:
+                    pass
+
+                if not ppd_model:
+                    ppd_model = "drv:///hp/hpcups.drv/hp-laserjet_professional_p1108.ppd"
+
+                res = subprocess.run(
+                    ["lpadmin", "-p", queue_name, "-E", "-v", device_uri, "-m", ppd_model,
+                     "-D", "HP LaserJet P1108 Monochrome Laser", "-L", "Campus Kiosk Simplex Bay"],
+                    capture_output=True, text=True, timeout=15
+                )
+                if res.returncode != 0:
+                    # Fallback to generic PPD
+                    subprocess.run(
+                        ["lpadmin", "-p", queue_name, "-E", "-v", device_uri, "-m", "drv:///sample.drv/generic.ppd",
+                         "-D", "HP LaserJet P1108 Monochrome Laser", "-L", "Campus Kiosk Simplex Bay"],
+                        capture_output=True, text=True, timeout=10
+                    )
+
+                # Enable queue & accept print jobs
+                subprocess.run(["cupsenable", queue_name], capture_output=True, timeout=5)
+                subprocess.run(["cupsaccept", queue_name], capture_output=True, timeout=5)
+
+                # Configure A4 monochrome simplex (P1108 does not support duplex or color)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "media=A4"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "ColorModel=Gray"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "print-color-mode=monochrome"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "sides=one-sided"], capture_output=True, timeout=5)
+                subprocess.run(["lpoptions", "-p", queue_name, "-o", "Duplex=None"], capture_output=True, timeout=5)
+
+                logger.info(f"Successfully auto-registered and activated CUPS queue '{queue_name}'.")
+            except Exception as e:
+                logger.warning(f"Failed to auto-register HP LaserJet P1108 CUPS queue: {e}")
+
+        return queue_name
+
+    # --------------------------------------------------------------------------
     # Multi-Printer Auto-Discovery (USB, IPP-USB, Network, CUPS Queues)
     # --------------------------------------------------------------------------
     def discover_all_printers(self) -> List[Dict[str, Any]]:
@@ -189,8 +300,9 @@ class CupsController:
 
         Never creates fake records. Never assumes all five printers are connected.
         """
-        # Auto-provision Pantum if connected on USB
+        # Auto-provision Pantum M7108DW and HP LaserJet P1108 if connected on USB
         pantum_provisioned = self._ensure_pantum_queue_registered()
+        p1108_provisioned = self._ensure_hp_p1108_queue_registered()
 
         printers: List[Dict[str, Any]] = []
         seen_keys = set()
@@ -307,8 +419,15 @@ class CupsController:
             except Exception:
                 pass
 
+            # HP LaserJet P1108 is strictly monochrome & simplex
+            if any(k in q_name.lower() or k in raw_model.lower() for k in ["p1108", "p1102", "laserjet_p11"]):
+                supports_color = False
+                supports_duplex = False
+                manufacturer = "HP"
+                clean_model = "HP LaserJet P1108"
+
             # HP Laser 108w is strictly monochrome & simplex
-            if "108" in q_name or "108" in raw_model:
+            elif "108" in q_name or "108" in raw_model:
                 supports_color = False
                 supports_duplex = False
 
@@ -380,7 +499,12 @@ class CupsController:
                             manufacturer = "HP" if mfg == "Hewlett-Packard" else mfg
                             break
 
-                    model = "HP Laser 108w" if ("108" in uri_lower or manufacturer == "HP") else f"{manufacturer} Printer"
+                    if "p1108" in uri_lower or "p1102" in uri_lower:
+                        model = "HP LaserJet P1108"
+                    elif "108" in uri_lower or manufacturer == "HP":
+                        model = "HP Laser 108w"
+                    else:
+                        model = f"{manufacturer} Printer"
                     hw_id = make_hardware_id(conn_type, uri, model)
 
                     if hw_id not in seen_keys:
@@ -454,13 +578,62 @@ class CupsController:
             except Exception:
                 pass
 
-        # 4. HP Laser 108w queue or endpoint representation ONLY IF physically connected on USB bus
-        has_hp_108w = any("108" in p.get("cups_queue_name", "").lower() or "108" in p.get("model", "").lower() for p in printers)
-        if not has_hp_108w:
-            # Check if HP hardware is connected via lsusb
+        # 4. HP LaserJet P1108 queue or endpoint representation ONLY IF physically connected on USB bus
+        has_hp_p1108 = any(
+            "p1108" in p.get("cups_queue_name", "").lower() or "p1108" in p.get("model", "").lower()
+            for p in printers
+        )
+        if not has_hp_p1108:
             try:
                 usb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
-                if ("Hewlett-Packard" in usb_out or "03f0:" in usb_out or "04e8:" in usb_out) and "232b:" not in usb_out:
+                usb_lower = usb_out.lower()
+                if "p1108" in usb_lower or "03f0:002a" in usb_lower or "03f0:112a" in usb_lower:
+                    p1108_q = "HP_LaserJet_P1108"
+                    p_status, p_msg = self.get_queue_status(p1108_q)
+                    hw_id = make_hardware_id("USB", "usb://HP/LaserJet%20Professional%20P1108", "HP LaserJet P1108")
+                    if hw_id not in seen_keys:
+                        seen_keys.add(hw_id)
+                        printers.append({
+                            "hardware_id": hw_id,
+                            "printer_name": "HP LaserJet P1108",
+                            "display_name": "HP LaserJet P1108 (USB)",
+                            "manufacturer": "HP",
+                            "model": "HP LaserJet P1108",
+                            "cups_queue_name": p1108_q,
+                            "device_uri": "usb://HP/LaserJet%20Professional%20P1108",
+                            "connection_type": "USB",
+                            "status": p_status,
+                            "printer_type": "BW",
+                            "supports_color": False,
+                            "supports_duplex": False,
+                            "paper_sizes": ["A4", "Letter"],
+                            "document_formats": ["application/pdf"],
+                            "last_error": None if p_status in ("READY", "BUSY") else p_msg,
+                            "is_default": len(printers) == 0,
+                            "capabilities": {
+                                "color": False,
+                                "grayscale": True,
+                                "duplex": False,
+                                "paper_sizes": ["A4", "Letter"],
+                            },
+                        })
+            except Exception:
+                pass
+
+        # 5. HP Laser 108w queue or endpoint representation ONLY IF physically connected on USB bus
+        has_hp_108w = any(
+            ("108w" in p.get("cups_queue_name", "").lower() or "108w" in p.get("model", "").lower() or "laser_108" in p.get("cups_queue_name", "").lower())
+            and "p1108" not in p.get("cups_queue_name", "").lower()
+            and "p1108" not in p.get("model", "").lower()
+            for p in printers
+        )
+        if not has_hp_108w:
+            # Check if HP 108w hardware is connected via lsusb (exclude P1108 PIDs 002a/112a)
+            try:
+                usb_out = subprocess.check_output(["lsusb"], text=True, stderr=subprocess.DEVNULL)
+                usb_lower = usb_out.lower()
+                is_p1108_usb = "p1108" in usb_lower or "03f0:002a" in usb_lower or "03f0:112a" in usb_lower
+                if not is_p1108_usb and ("Hewlett-Packard" in usb_out or "03f0:" in usb_out or "04e8:" in usb_out) and "232b:" not in usb_out:
                     hw_id = make_hardware_id("IPP-USB", IPP_USB_ENDPOINT, "HP Laser 108w")
                     if hw_id not in seen_keys:
                         seen_keys.add(hw_id)
@@ -813,9 +986,12 @@ class CupsController:
         is_color = bool(options.get("is_color", False))
         is_duplex = bool(options.get("is_duplex", False))
 
-        # Check queue color capability
-        is_hp_108w = ("108" in target_queue.lower())
-        if is_color and is_hp_108w:
+        # Check queue color capability (108w, P1108, P1102, Pantum M7100DW are strictly monochrome)
+        is_monochrome_only = any(
+            k in target_queue.lower()
+            for k in ("108w", "108", "p1108", "p1102", "laserjet_p11", "pantum", "m7100", "m7108")
+        )
+        if is_color and is_monochrome_only:
             raise CupsSubmissionError(
                 f"Incompatible printer: Target queue '{target_queue}' is strictly monochrome. Cannot process color job."
             )

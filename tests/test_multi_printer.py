@@ -508,6 +508,82 @@ class TestMultiPrinterSystem(unittest.TestCase):
 
         self.assertEqual(target_queue, "PANTUM_M7100DW")
 
+    def test_hp_p1108_auto_provisioning_when_unregistered(self):
+        """
+        Verify that _ensure_hp_p1108_queue_registered detects HP LaserJet P1108 (03f0:002a)
+        and invokes lpadmin + cupsenable + lpoptions to auto-provision HP_LaserJet_P1108.
+        """
+        controller = CupsController()
+        with patch("subprocess.check_output") as mock_check, patch("subprocess.run") as mock_run:
+            def check_output_mock(cmd, **kwargs):
+                if cmd[0] == "lsusb":
+                    return "Bus 001 Device 006: ID 03f0:002a HP, Inc LaserJet Professional P1108\n"
+                if cmd[0] == "lpinfo" and "-v" in cmd:
+                    return "direct hp:/usb/HP_LaserJet_Professional_P1108?serial=000000\n"
+                if cmd[0] == "lpinfo" and "-m" in cmd:
+                    return "drv:///hp/hpcups.drv/hp-laserjet_professional_p1108.ppd HP LaserJet Professional P1108, hpcups 3.22.10\n"
+                if cmd[0] == "lpstat" and "HP_LaserJet_P1108" in cmd:
+                    raise Exception("Printer does not exist")
+                return ""
+
+            mock_check.side_effect = check_output_mock
+            mock_run.return_value = MagicMock(returncode=0)
+
+            queue_name = controller._ensure_hp_p1108_queue_registered()
+            self.assertEqual(queue_name, "HP_LaserJet_P1108")
+
+            lpadmin_calls = [call for call in mock_run.call_args_list if call[0][0][0] == "lpadmin"]
+            self.assertTrue(len(lpadmin_calls) >= 1)
+            self.assertIn("HP_LaserJet_P1108", lpadmin_calls[0][0][0])
+
+    def test_pantum_and_hp_p1108_dual_discovery_and_color_guard(self):
+        """
+        Verify both PANTUM_M7100DW and HP_LaserJet_P1108 are discovered cleanly
+        without colliding with HP Laser 108w, and P1108 rejects color jobs.
+        """
+        controller = CupsController(default_queue="PANTUM_M7100DW")
+        controller.get_queue_status = MagicMock(return_value=("READY", "Printer idle and ready"))
+        controller._ensure_pantum_queue_registered = MagicMock(return_value="PANTUM_M7100DW")
+        controller._ensure_hp_p1108_queue_registered = MagicMock(return_value="HP_LaserJet_P1108")
+
+        with patch("cups_controller.HAS_PYCUPS", False), patch("subprocess.check_output") as mock_subp:
+            def side_effect(cmd, **kwargs):
+                if cmd[0] == "lpstat" and "-v" in cmd:
+                    return (
+                        "device for PANTUM_M7100DW: ipp://127.0.0.1:60000/ipp/print\n"
+                        "device for HP_LaserJet_P1108: hp:/usb/HP_LaserJet_Professional_P1108?serial=123\n"
+                    )
+                if cmd[0] == "lpstat" and "-d" in cmd:
+                    return "system default destination: PANTUM_M7100DW\n"
+                if cmd[0] == "lpoptions":
+                    return "PageSize/Media Size: *A4 Letter\nColorModel/Color: *Gray\n"
+                if cmd[0] == "lsusb":
+                    return (
+                        "Bus 001 Device 004: ID 232b:0ed0 Pantum M7100DW Series\n"
+                        "Bus 001 Device 006: ID 03f0:002a HP, Inc LaserJet Professional P1108\n"
+                    )
+                return ""
+
+            mock_subp.side_effect = side_effect
+            printers = controller.discover_all_printers()
+
+        self.assertEqual(len(printers), 2)
+        pantum = next((p for p in printers if p["cups_queue_name"] == "PANTUM_M7100DW"), None)
+        p1108 = next((p for p in printers if p["cups_queue_name"] == "HP_LaserJet_P1108"), None)
+        self.assertIsNotNone(pantum)
+        self.assertIsNotNone(p1108)
+        self.assertTrue(pantum["supports_duplex"])
+        self.assertFalse(p1108["supports_duplex"])
+        self.assertFalse(p1108["supports_color"])
+        self.assertEqual(p1108["model"], "HP LaserJet P1108")
+
+        # Verify P1108 rejects color job
+        temp_pdf = os.path.join(self.test_dir, "color_test.pdf")
+        with open(temp_pdf, "wb") as f:
+            f.write(b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n")
+        with self.assertRaises(CupsSubmissionError):
+            controller.submit_print_job(temp_pdf, {"is_color": True, "copies": 1}, queue_name="HP_LaserJet_P1108")
+
 
 if __name__ == "__main__":
     unittest.main()

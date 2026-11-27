@@ -1014,10 +1014,21 @@ export async function dbUpsertDiscoveredPrinters(
                                 p.id === '44444444-4444-4444-4444-444444444444';
         if (isItemPantum && isPrinterPantum) return true;
 
-        // Broad match HP Laser 108w
-        const isItem108 = (item.model || '').toLowerCase().includes('108') || (queueName || '').toLowerCase().includes('108');
-        const isPrinter108 = (p.model || '').toLowerCase().includes('108') || (p.cups_queue_name || '').toLowerCase().includes('108');
-        if (isItem108 && isPrinter108) return true;
+        // Broad match HP LaserJet P1108 (keep separate from HP Laser 108w)
+        const itemModelLower = (item.model || '').toLowerCase();
+        const itemQueueLower = (queueName || '').toLowerCase();
+        const pModelLower = (p.model || '').toLowerCase();
+        const pQueueLower = (p.cups_queue_name || '').toLowerCase();
+
+        const isItemP1108 = itemModelLower.includes('p1108') || itemQueueLower.includes('p1108');
+        const isPrinterP1108 = pModelLower.includes('p1108') || pQueueLower.includes('p1108');
+        if (isItemP1108 && isPrinterP1108) return true;
+        if (isItemP1108 !== isPrinterP1108) return false;
+
+        // Broad match HP Laser 108w (only when neither is P1108)
+        const isItem108w = itemModelLower.includes('108w') || itemQueueLower.includes('108w') || itemQueueLower.includes('laser_108');
+        const isPrinter108w = pModelLower.includes('108w') || pQueueLower.includes('108w') || pQueueLower.includes('laser_108');
+        if (isItem108w && isPrinter108w) return true;
 
         return false;
       });
@@ -1052,18 +1063,6 @@ export async function dbUpsertDiscoveredPrinters(
         await dbUpdatePrinter(match.id, updates);
         store.updatePrinter(match.id, updates as any);
         updatedCount++;
-
-        // Auto-point routing table to Pantum if active
-        if (isPantum && status === 'READY') {
-          const currentRouting = await dbGetRouting(kioskId);
-          if (currentRouting) {
-            await dbUpsertRouting(kioskId, {
-              ...currentRouting,
-              bw_primary_printer_id: match.id,
-              auto_backup_enabled: true,
-            });
-          }
-        }
 
         // Record error if in error state
         if (['ERROR', 'PAPER_OUT', 'TONER_EMPTY', 'STOPPED', 'OFFLINE'].includes(status)) {
@@ -1147,6 +1146,60 @@ export async function dbUpsertDiscoveredPrinters(
     }
 
     const refreshed = await dbGetPrinters(undefined, kioskId);
+
+    // Smart non-overwriting routing auto-assignment:
+    // Respects admin routing changes! Only populates missing primary/backup slots
+    // or wires up a newly connected second printer as backup for zero-downtime failover.
+    const readyBw = refreshed.filter((p) => p.enabled && p.status === 'READY' && !p.supports_color);
+    if (readyBw.length > 0) {
+      const currentRouting = await dbGetRouting(kioskId);
+      const isPantumPrinter = (p: DbPrinter) =>
+        (p.manufacturer || '').toLowerCase().includes('pantum') ||
+        (p.cups_queue_name || '').toLowerCase().includes('pantum') ||
+        p.id === '44444444-4444-4444-4444-444444444444';
+
+      // Prefer duplex-capable / Pantum as initial default primary when no primary is configured
+      const preferredPrimary = readyBw.find(isPantumPrinter) || readyBw.find((p) => p.supports_duplex) || readyBw[0];
+
+      if (!currentRouting) {
+        const backupCandidate = readyBw.find((p) => p.id !== preferredPrimary.id) || null;
+        await dbUpsertRouting(kioskId, {
+          bw_primary_printer_id: preferredPrimary.id,
+          bw_backup_printer_id: backupCandidate ? backupCandidate.id : null,
+          auto_backup_enabled: true,
+        });
+      } else {
+        const primaryExists = Boolean(
+          currentRouting.bw_primary_printer_id &&
+          refreshed.some((p) => p.id === currentRouting.bw_primary_printer_id && p.enabled)
+        );
+        const targetPrimaryId = primaryExists
+          ? currentRouting.bw_primary_printer_id!
+          : preferredPrimary.id;
+
+        const backupExists = Boolean(
+          currentRouting.bw_backup_printer_id &&
+          currentRouting.bw_backup_printer_id !== targetPrimaryId &&
+          refreshed.some((p) => p.id === currentRouting.bw_backup_printer_id && p.enabled)
+        );
+        const backupCandidate = readyBw.find((p) => p.id !== targetPrimaryId);
+
+        const needsPrimaryUpdate = !primaryExists;
+        const needsBackupUpdate = !backupExists && Boolean(backupCandidate);
+
+        if (needsPrimaryUpdate || needsBackupUpdate) {
+          await dbUpsertRouting(kioskId, {
+            ...currentRouting,
+            bw_primary_printer_id: targetPrimaryId,
+            bw_backup_printer_id: backupExists
+              ? currentRouting.bw_backup_printer_id
+              : (backupCandidate ? backupCandidate.id : currentRouting.bw_backup_printer_id),
+            auto_backup_enabled: needsBackupUpdate ? true : currentRouting.auto_backup_enabled,
+          });
+        }
+      }
+    }
+
     return { updatedCount, addedCount, printers: refreshed };
   } catch (err) {
     console.error('[DB] dbUpsertDiscoveredPrinters error:', err);
