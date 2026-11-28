@@ -913,18 +913,23 @@ class CupsController:
                     shutil.copy2(file_path, temp_office_path)
 
                 expected_pdf = os.path.splitext(temp_office_path)[0] + ".pdf"
+                lo_bin = shutil.which("libreoffice") or shutil.which("soffice") or "libreoffice"
+                lo_env = dict(os.environ)
+                lo_env["HOME"] = "/tmp"
                 try:
                     cmd = [
-                        "libreoffice",
+                        lo_bin,
                         "--headless",
                         "--norestore",
+                        "--nofirststartwizard",
+                        "-env:UserInstallation=file:///tmp/smartprint_lo_profile",
                         "--convert-to",
                         "pdf",
                         "--outdir",
                         out_dir,
                         temp_office_path,
                     ]
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=lo_env)
                     if res.returncode == 0 and os.path.exists(expected_pdf) and os.path.getsize(expected_pdf) > 0:
                         logger.info(f"Successfully converted {ext} document to PDF via LibreOffice: {expected_pdf}")
                         return expected_pdf

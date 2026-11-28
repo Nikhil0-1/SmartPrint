@@ -96,35 +96,40 @@ export class SupabaseStorageService implements IStorageService {
     });
 
     if (isSupabaseConfigured()) {
-      try {
-        const { error } = await supabaseAdmin.storage
-          .from(this.bucket)
-          .upload(objectKey, params.buffer, {
-            contentType: params.mimeType,
-            upsert: true,
-          });
+      const primaryMime = params.mimeType || 'application/octet-stream';
+      const candidateMimes = Array.from(new Set([primaryMime, 'application/pdf', 'application/octet-stream']));
+      let lastErrorMessage = 'Unknown storage error';
 
-        if (error) {
-          console.warn(`[STORAGE WARNING] Supabase Storage upload error: ${error.message}. Fallback to local secure buffer.`);
-          return {
-            bucket: this.bucket,
-            objectKey,
-            sizeBytes: params.buffer.length,
-            mimeType: params.mimeType,
-            storageProvider: 'LOCAL_SECURE_BUFFER',
-          };
+      for (const contentType of candidateMimes) {
+        try {
+          const { error } = await supabaseAdmin.storage
+            .from(this.bucket)
+            .upload(objectKey, params.buffer, {
+              contentType,
+              upsert: true,
+            });
+
+          if (!error) {
+            return {
+              bucket: this.bucket,
+              objectKey,
+              sizeBytes: params.buffer.length,
+              mimeType: params.mimeType,
+              storageProvider: 'SUPABASE_STORAGE',
+            };
+          }
+
+          lastErrorMessage = error.message;
+          console.warn(`[STORAGE WARNING] Supabase upload attempt (${contentType}) failed: ${error.message}`);
+        } catch (err) {
+          lastErrorMessage = (err as Error).message;
+          console.warn(`[STORAGE ERROR] Supabase connection error (${contentType}): ${lastErrorMessage}`);
         }
-
-        return {
-          bucket: this.bucket,
-          objectKey,
-          sizeBytes: params.buffer.length,
-          mimeType: params.mimeType,
-          storageProvider: 'SUPABASE_STORAGE',
-        };
-      } catch (err) {
-        console.warn(`[STORAGE ERROR] Supabase connection error: ${(err as Error).message}`);
       }
+
+      // Never silently succeed with ephemeral in-memory buffer in production:
+      // another serverless lambda handling /api/kiosk/download will return HTTP 410 Gone!
+      throw new Error(`Cloud storage upload failed: ${lastErrorMessage}`);
     }
 
     return {
