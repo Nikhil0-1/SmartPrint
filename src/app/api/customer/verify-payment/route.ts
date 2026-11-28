@@ -8,6 +8,7 @@ import {
   dbCreatePrintJob,
   dbEnqueuePrintJob,
   dbGetJobQueuePosition,
+  dbSelectBestPrinterForJob,
   dbWriteSystemLog,
 } from '@/lib/db';
 import { verifyPaymentSignature } from '@/lib/razorpay';
@@ -106,7 +107,18 @@ export async function POST(request: Request) {
         });
       }
 
-      const queued = await dbEnqueuePrintJob(jId, dbJob?.printer_id || undefined);
+      let resolvedPrinterId = dbJob?.printer_id || undefined;
+      if (!resolvedPrinterId && dbJob) {
+        const sel = await dbSelectBestPrinterForJob(
+          dbJob.kiosk_id,
+          Boolean(dbJob.is_color),
+          Boolean(dbJob.is_duplex),
+          dbJob.organization_id || undefined
+        );
+        if (sel.printer) resolvedPrinterId = sel.printer.id;
+      }
+
+      const queued = await dbEnqueuePrintJob(jId, resolvedPrinterId);
       if (!firstQueuedJob) firstQueuedJob = queued || dbJob;
 
       store.updateJobStatus(jId, 'QUEUED');

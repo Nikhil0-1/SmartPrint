@@ -8,6 +8,7 @@ import {
   dbUpdatePrintJobStatus,
   dbGetPrintJob,
   dbEnqueuePrintJob,
+  dbSelectBestPrinterForJob,
   dbWriteSystemLog,
   dbRecordPaymentTransaction,
 } from '@/lib/db';
@@ -106,7 +107,17 @@ export async function POST(request: Request) {
         // Transition print job to QUEUED in FIFO order so it can be picked up by the Pi agent
         const job = await dbGetPrintJob(jobId);
         if (job) {
-          await dbEnqueuePrintJob(jobId, job.printer_id || undefined);
+          let resolvedPrinterId = job.printer_id || undefined;
+          if (!resolvedPrinterId) {
+            const sel = await dbSelectBestPrinterForJob(
+              job.kiosk_id,
+              Boolean(job.is_color),
+              Boolean(job.is_duplex),
+              job.organization_id || undefined
+            );
+            if (sel.printer) resolvedPrinterId = sel.printer.id;
+          }
+          await dbEnqueuePrintJob(jobId, resolvedPrinterId);
         }
 
         await dbWriteSystemLog({

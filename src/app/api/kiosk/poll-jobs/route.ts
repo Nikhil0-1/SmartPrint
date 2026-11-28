@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
-import { dbClaimNextPrintJob, dbGetPrinter } from '@/lib/db';
+import { dbClaimNextPrintJob, dbGetPrinter, dbSelectBestPrinterForJob } from '@/lib/db';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { authenticateDeviceRequest } from '@/lib/deviceAuth';
 
@@ -26,10 +26,23 @@ export async function POST(request: Request) {
 
     if (claimedJob) {
       let cupsQueueName = 'PANTUM_M7100DW';
-      if (claimedJob.printer_id) {
-        const printer = await dbGetPrinter(claimedJob.printer_id);
+      let resolvedPrinterId = claimedJob.printer_id;
+      if (resolvedPrinterId) {
+        const printer = await dbGetPrinter(resolvedPrinterId);
         if (printer) {
           cupsQueueName = printer.cups_queue_name;
+        }
+      } else {
+        // Fallback: resolve from Admin Routing Table (respects Color vs B&W routing)
+        const sel = await dbSelectBestPrinterForJob(
+          kioskId,
+          Boolean(claimedJob.is_color),
+          Boolean(claimedJob.is_duplex),
+          claimedJob.organization_id || undefined
+        );
+        if (sel.printer) {
+          resolvedPrinterId = sel.printer.id;
+          cupsQueueName = sel.printer.cups_queue_name;
         }
       }
 
@@ -38,7 +51,7 @@ export async function POST(request: Request) {
         idempotency_key: claimedJob.idempotency_key,
         organization_id: claimedJob.organization_id,
         kiosk_id: claimedJob.kiosk_id,
-        printer_id: claimedJob.printer_id,
+        printer_id: resolvedPrinterId,
         cups_printer_name: cupsQueueName,
         cups_queue_name: cupsQueueName,
         pages_total: claimedJob.pages_total,

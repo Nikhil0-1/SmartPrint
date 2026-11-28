@@ -6,6 +6,7 @@ import {
   dbSelectBestPrinterForJob,
   dbCreatePaymentOrder,
   dbUpdatePrintJobStatus,
+  dbUpdatePrintJobConfig,
 } from '@/lib/db';
 import { createMultiTenantRazorpayOrder, getPublicRazorpayKeyId } from '@/lib/razorpay';
 
@@ -89,6 +90,12 @@ export async function POST(request: Request) {
     if (!selectedPrinter) {
       return NextResponse.json({ error: printerSelection.error || 'The required printer is currently unavailable.', code: 'PRINTER_UNAVAILABLE' }, { status: 503 });
     }
+
+    // Persist the routed printer_id on each print job immediately so payment/webhook/poll-jobs
+    // always dispatch to the exact printer selected by Admin Routing (Color or B&W).
+    await Promise.all(
+      jobsData.map(({ id }) => dbUpdatePrintJobConfig(id, { printer_id: selectedPrinter!.id }))
+    );
 
     // Create a single Razorpay order for the combined amount
     const order = await createMultiTenantRazorpayOrder(

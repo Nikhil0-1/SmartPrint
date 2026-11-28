@@ -1200,6 +1200,53 @@ export async function dbUpsertDiscoveredPrinters(
       }
     }
 
+    // Smart non-overwriting Color routing auto-assignment:
+    // Respects admin selection! Only populates missing color_primary / color_backup
+    // or wires up a newly connected Color printer so Color jobs route properly out of the box.
+    const readyColor = refreshed.filter((p) => p.enabled && p.status === 'READY' && p.supports_color);
+    if (readyColor.length > 0) {
+      const currentRouting = await dbGetRouting(kioskId);
+      const preferredColorPrimary = readyColor[0];
+
+      if (!currentRouting) {
+        const colorBackup = readyColor.find((p) => p.id !== preferredColorPrimary.id) || null;
+        await dbUpsertRouting(kioskId, {
+          color_primary_printer_id: preferredColorPrimary.id,
+          color_backup_printer_id: colorBackup ? colorBackup.id : null,
+          auto_backup_enabled: true,
+        });
+      } else {
+        const colorPrimaryValid = Boolean(
+          currentRouting.color_primary_printer_id &&
+          refreshed.some((p) => p.id === currentRouting.color_primary_printer_id && p.enabled && p.supports_color)
+        );
+        const targetColorPrimaryId = colorPrimaryValid
+          ? currentRouting.color_primary_printer_id!
+          : preferredColorPrimary.id;
+
+        const colorBackupValid = Boolean(
+          currentRouting.color_backup_printer_id &&
+          currentRouting.color_backup_printer_id !== targetColorPrimaryId &&
+          refreshed.some((p) => p.id === currentRouting.color_backup_printer_id && p.enabled && p.supports_color)
+        );
+        const colorBackupCandidate = readyColor.find((p) => p.id !== targetColorPrimaryId);
+
+        const needsColorPrimary = !colorPrimaryValid;
+        const needsColorBackup = !colorBackupValid && Boolean(colorBackupCandidate);
+
+        if (needsColorPrimary || needsColorBackup) {
+          await dbUpsertRouting(kioskId, {
+            ...currentRouting,
+            color_primary_printer_id: targetColorPrimaryId,
+            color_backup_printer_id: colorBackupValid
+              ? currentRouting.color_backup_printer_id
+              : (colorBackupCandidate ? colorBackupCandidate.id : currentRouting.color_backup_printer_id),
+            auto_backup_enabled: needsColorBackup ? true : currentRouting.auto_backup_enabled,
+          });
+        }
+      }
+    }
+
     return { updatedCount, addedCount, printers: refreshed };
   } catch (err) {
     console.error('[DB] dbUpsertDiscoveredPrinters error:', err);
@@ -1733,6 +1780,7 @@ export async function dbUpdatePrintJobConfig(
     orientation?: string;
     calculated_amount?: number;
     amount_paise?: number;
+    printer_id?: string | null;
   }
 ): Promise<void> {
   if (!isConfigured()) return;
@@ -1745,6 +1793,7 @@ export async function dbUpdatePrintJobConfig(
   if (config.orientation !== undefined) updates.orientation = config.orientation;
   if (config.calculated_amount !== undefined) updates.calculated_amount = config.calculated_amount;
   if (config.amount_paise !== undefined) updates.amount_paise = config.amount_paise;
+  if (config.printer_id !== undefined) updates.printer_id = config.printer_id;
 
   const { error } = await supabaseAdmin
     .from('print_jobs')

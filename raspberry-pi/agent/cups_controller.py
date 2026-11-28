@@ -389,10 +389,14 @@ class CupsController:
             if not clean_model:
                 clean_model = q_name
 
-            # Detect color support
+            # Detect color support from model name, queue name, and CUPS PPD options
             supports_color = False
-            # Check model name keywords
-            if any(k in raw_model.lower() or k in q_name.lower() for k in ["color", "colour", "cmyk", "rgb"]):
+            color_keywords = [
+                "color", "colour", "cmyk", "rgb", "ecotank", "pixma",
+                "smart tank", "smart_tank", "ink tank", "ink_tank", "deskjet", "officejet", "envy",
+                "l3110", "l3150", "l3210", "l3250", "l4150", "l4260", "g2010", "g3010", "g3020",
+            ]
+            if any(k in raw_model.lower() or k in q_name.lower() for k in color_keywords):
                 supports_color = True
 
             # Check queue options if possible
@@ -402,9 +406,10 @@ class CupsController:
                 lp_opts = subprocess.check_output(["lpoptions", "-p", q_name, "-l"], text=True, stderr=subprocess.DEVNULL)
                 lp_opts_lower = lp_opts.lower()
                 for line in lp_opts.splitlines():
-                    if line.lower().startswith("colormodel/"):
-                        val_part = line.split(":", 1)[1].lower() if ":" in line else ""
-                        if any(c in val_part for c in ["rgb", "cmyk", "*color"]):
+                    l_lower = line.lower()
+                    if any(l_lower.startswith(prefix) for prefix in ("colormodel/", "print-color-mode/", "colormode/", "ink/", "outputmode/")):
+                        val_part = l_lower.split(":", 1)[1] if ":" in l_lower else ""
+                        if any(c in val_part for c in ["rgb", "cmyk", "cmy", "color"]):
                             supports_color = True
                 if "duplex" in lp_opts_lower and "duplexnotumble" in lp_opts_lower:
                     supports_duplex = True

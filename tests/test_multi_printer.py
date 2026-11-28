@@ -584,6 +584,54 @@ class TestMultiPrinterSystem(unittest.TestCase):
         with self.assertRaises(CupsSubmissionError):
             controller.submit_print_job(temp_pdf, {"is_color": True, "copies": 1}, queue_name="HP_LaserJet_P1108")
 
+    def test_color_printer_discovery_and_color_cups_options(self):
+        """
+        Verify color printers (e.g. Epson EcoTank L3250, HP Color LaserJet) are discovered
+        with supports_color=True and submitted with ColorModel=RGB & print-color-mode=color.
+        """
+        controller = CupsController(default_queue="PANTUM_M7100DW")
+        controller.get_queue_status = MagicMock(return_value=("READY", "Printer idle and ready"))
+        controller._ensure_pantum_queue_registered = MagicMock(return_value="PANTUM_M7100DW")
+        controller._ensure_hp_p1108_queue_registered = MagicMock(return_value=None)
+
+        with patch("cups_controller.HAS_PYCUPS", False), patch("subprocess.check_output") as mock_subp:
+            def side_effect(cmd, **kwargs):
+                if cmd[0] == "lpstat" and "-v" in cmd:
+                    return (
+                        "device for PANTUM_M7100DW: ipp://127.0.0.1:60000/ipp/print\n"
+                        "device for EPSON_L3250: usb://EPSON/L3250%20Series?serial=ABC\n"
+                    )
+                if cmd[0] == "lpstat" and "-d" in cmd:
+                    return "system default destination: PANTUM_M7100DW\n"
+                if cmd[0] == "lpoptions":
+                    if "EPSON_L3250" in cmd:
+                        return "PageSize/Media Size: *A4\nprint-color-mode/Color Mode: monochrome *color\n"
+                    return "PageSize/Media Size: *A4\nColorModel/Color: *Gray\n"
+                if cmd[0] == "lsusb":
+                    return "Bus 001 Device 004: ID 232b:0ed0 Pantum M7100DW Series\nBus 001 Device 007: ID 04b8:08d1 Seiko Epson Corp. L3250\n"
+                return ""
+
+            mock_subp.side_effect = side_effect
+            printers = controller.discover_all_printers()
+
+        epson = next((p for p in printers if p["cups_queue_name"] == "EPSON_L3250"), None)
+        self.assertIsNotNone(epson)
+        self.assertTrue(epson["supports_color"])
+
+        # Verify color submission passes RGB + color options to lp
+        temp_pdf = os.path.join(self.test_dir, "color_doc.pdf")
+        with open(temp_pdf, "wb") as f:
+            f.write(b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n")
+
+        with patch("cups_controller.HAS_PYCUPS", False), patch("subprocess.check_output") as mock_lp:
+            mock_lp.return_value = "request id is EPSON_L3250-99 (1 file(s))\n"
+            job_id = controller.submit_print_job(temp_pdf, {"is_color": True, "copies": 1}, queue_name="EPSON_L3250")
+            self.assertEqual(job_id, 99)
+            lp_calls = [c[0][0] for c in mock_lp.call_args_list if c[0][0][0] == "lp"]
+            self.assertTrue(len(lp_calls) >= 1)
+            self.assertIn("ColorModel=RGB", lp_calls[0])
+            self.assertIn("print-color-mode=color", lp_calls[0])
+
 
 if __name__ == "__main__":
     unittest.main()
